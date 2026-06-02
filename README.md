@@ -6,14 +6,34 @@ Borromean links and for checking candidate duplicate links.
 ## Properties
 
 A link is **Brunnian** if the full link is nontrivial, but removing any one
-component gives an unlink. Equivalently, every proper sublink is trivial. In
-this code, the Brunnian test checks all sublinks obtained by deleting one
-component.
+component gives an unlink. Equivalently, every proper sublink is trivial. The
+classical example is the Borromean rings.
+
+This repository uses the common convention that Brunnian links have at least 3
+components. Some formal knot-theory definitions allow the n=2 case; under that
+broader convention, a 2-component link is Brunnian if the full link is
+nontrivial and each individual component is an unknot. For example, the Hopf
+link can be Brunnian under the broad n=2-allowed convention, but not under the
+n>=3 convention used here.
+
+For the n>=3 convention, the code checks that the full link is nontrivial and
+that every delete-one-component sublink is an unlink. Checking only delete-one
+sublinks is sufficient: any smaller proper sublink is contained in one of those
+delete-one sublinks, and a sublink of an unlink is also an unlink.
 
 A link is treated as **Borromean** here if the full link is nontrivial and every
 2-component sublink is an unlink. This includes the classical Borromean rings
 and extends the same pairwise-unlinked condition to links with more than three
-components.
+components. For n>3, this generalized Borromean condition is weaker than the
+Brunnian condition, because a 3-component or larger proper sublink may still be
+nontrivial even when every pair of components is unlinked.
+
+The n=2 Brunnian edge case is not the same thing as being a 2-component prime
+link. Under the broad n=2 convention, Brunnian means "nontrivial link with both
+components unknotted." Prime means the link cannot be decomposed as a
+nontrivial connected sum. These are different properties; for instance, Knot
+Atlas describes `L10a108` as two interlinked trefoil knots, so its components
+are not unknots.
 
 ## HT Table
 
@@ -77,3 +97,10 @@ The `mark` column preserves the original quick duplicate-candidate grouping:
 matching stars (`*`, `**`, etc.) indicate rows with the same component count,
 crossing number, and rounded volume. Use `determine_duplicate_links.py` for the
 stronger exterior-isomorphism check.
+
+## References
+
+- H. N. Howards, [Brunnian Spheres](https://users.wfu.edu/howards/papers/brunnianspheres.pdf).
+- B. S. Mangum and T. Stanford, [Brunnian links are determined by their complements](https://eudml.org/doc/121302), Algebraic & Geometric Topology 1, 143-152, 2001.
+- C. Liang and K. Mislow, [On Borromean links](https://webhomes.maths.ed.ac.uk/~v1ranick/papers/liangmislow.pdf), Journal of Mathematical Chemistry 16, 27-35, 1994.
+- Knot Atlas, [L10a108 Quick Notes](https://katlas.org/wiki/L10a108_Quick_Notes).
