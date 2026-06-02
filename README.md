@@ -17,12 +17,14 @@ components.
 
 ## HT Table
 
-The HT table is SnapPy's `HTLinkExteriors` census from the
-Hoste-Thistlethwaite link tables. It contains link exteriors for links up to 14
-crossings, together with data accessible through SnapPy such as the link name,
-number of cusps/components, volume, triangulation information, DT code, and
-solution type. The screening mode in this repository iterates through this
-table by crossing number and filters to links with at least 3 components.
+The HT table is SnapPy's
+[`HTLinkExteriors`](https://www.math.uic.edu/t3m/SnapPy/censuses.html#snappy.HTLinkExteriors)
+census from the Hoste-Thistlethwaite link tables. It contains link exteriors
+for links up to 14 crossings, together with data accessible through SnapPy such
+as the link name, number of cusps/components, volume, triangulation
+information, DT code, and solution type. The screening mode in this repository
+iterates through this table by crossing number and filters to links with at
+least 3 components.
 
 ## Master Scripts
 
