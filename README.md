@@ -3,6 +3,27 @@
 This repository contains cleaned SnapPy scripts for determining Brunnian and
 Borromean links and for checking candidate duplicate links.
 
+## Properties
+
+A link is **Brunnian** if the full link is nontrivial, but removing any one
+component gives an unlink. Equivalently, every proper sublink is trivial. In
+this code, the Brunnian test checks all sublinks obtained by deleting one
+component.
+
+A link is treated as **Borromean** here if the full link is nontrivial and every
+2-component sublink is an unlink. This includes the classical Borromean rings
+and extends the same pairwise-unlinked condition to links with more than three
+components.
+
+## HT Table
+
+The HT table is SnapPy's `HTLinkExteriors` census from the
+Hoste-Thistlethwaite link tables. It contains link exteriors for links up to 14
+crossings, together with data accessible through SnapPy such as the link name,
+number of cusps/components, volume, triangulation information, DT code, and
+solution type. The screening mode in this repository iterates through this
+table by crossing number and filters to links with at least 3 components.
+
 ## Master Scripts
 
 - `determine_brunnian_borromean.py`
@@ -54,9 +75,3 @@ The `mark` column preserves the original quick duplicate-candidate grouping:
 matching stars (`*`, `**`, etc.) indicate rows with the same component count,
 crossing number, and rounded volume. Use `determine_duplicate_links.py` for the
 stronger exterior-isomorphism check.
-
-## Archived Originals
-
-The original scripts were moved to `previous/`, which is ignored by git. That
-folder also contains notes describing how the master scripts replaced the older
-files.
