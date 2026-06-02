@@ -79,6 +79,32 @@ HT screening:
 python3 determine_brunnian_borromean.py --screen-ht --property both --method nr --only-matches --output Run_results/ht_screening_brunnian_borromean_nr.csv
 ```
 
+Duplicate-link check from command-line link strings:
+
+```bash
+python3 determine_duplicate_links.py --links L14n49573 L14n50824
+```
+
+Duplicate-link check from command-line DT-code strings. Quote each DT code so
+the shell passes it as one argument:
+
+```bash
+python3 determine_duplicate_links.py --links "DT: [(-8,-12,16),(-24,-22,-28,-26),(-10,-14,-2),(-20,-6,-18,-4)]" "DT: [(-6,16),(26,-2,34,32,-40,-30,4,38,-28,-36),(-8,-22,18,12),(10,-24,20,-14)]"
+```
+
+Duplicate-link check from an input file. In the file, use one link string per
+line and blank lines to separate independent candidate groups:
+
+```bash
+python3 determine_duplicate_links.py --input-file Examples/duplicate_candidate_groups.txt
+```
+
+Duplicate-link check with CSV output:
+
+```bash
+python3 determine_duplicate_links.py --input-file Examples/duplicate_candidate_groups.txt --output Run_results/duplicate_candidate_groups.csv
+```
+
 ## Screening Results
 
 `Run_results/` includes HT-table screening outputs for crossings 3 through 14:
