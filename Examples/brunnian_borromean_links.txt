@@ -1,0 +1,7 @@
+# One SnapPy link string per line.
+# SnapPy DT codes are valid link strings when written exactly as snappy.Link(...)
+# would receive them.
+
+L14n63195
+DT: [(-8,-12,16),(-24,-22,-28,-26),(-10,-14,-2),(-20,-6,-18,-4)]
+DT: [(18,20,22,24,26,28,30,32),(34,50,42,54,36,56,46,60),(16,44,8,48),(4,-52,-58,12),(-40,2,6,-38,10,14)]
