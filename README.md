@@ -58,6 +58,27 @@ nontrivial connected sum. These are different properties; for instance, Knot
 Atlas describes `L10a108` as two interlinked trefoil knots, so its components
 are not unknots.
 
+## Illustrated Examples
+
+The following examples are chosen from the generated screening files in
+`Run_results/`. The drawings are schematic illustrations of the link-property
+patterns, not exact SnapPy projections.
+
+`L6a4` appears in both `ht_screening_brunnian_nr.csv` and
+`ht_screening_borromean_nr.csv` with `is_brunnian=True` and
+`is_borromean=True`. It is the classical Borromean rings: the full 3-component
+link is nontrivial, but deleting any one ring leaves a 2-component unlink.
+
+![Schematic illustration of the Borromean rings as a Brunnian link](Examples/illustrations/brunnian_borromean_rings.svg)
+
+`L10n107` appears in `ht_screening_borromean_nr.csv` with
+`is_borromean=True` and `is_brunnian=False`. It is a 4-component example where
+every 2-component sublink is an unlink, but at least one larger proper sublink
+is still nontrivial. This illustrates why the generalized Borromean condition
+is weaker than the Brunnian condition for links with more than 3 components.
+
+![Schematic illustration of a Borromean but not Brunnian link](Examples/illustrations/borromean_not_brunnian.svg)
+
 ## HT Table
 
 The HT table is SnapPy's

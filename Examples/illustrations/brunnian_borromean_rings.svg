@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="420" viewBox="0 0 760 420" role="img" aria-labelledby="title desc">
+  <title id="title">Brunnian example from Run_results: L6a4</title>
+  <desc id="desc">A schematic drawing of L6a4, the three Borromean rings, a Brunnian link.</desc>
+  <rect width="760" height="420" fill="#f8fafc"/>
+  <text x="380" y="42" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="28" font-weight="700" fill="#172033">Brunnian example: L6a4</text>
+  <text x="380" y="78" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="17" fill="#475569">Run_results classification: Brunnian=True, Borromean=True</text>
+
+  <g transform="translate(40 10)">
+    <ellipse cx="300" cy="225" rx="150" ry="72" fill="none" stroke="#2563eb" stroke-width="26"/>
+    <ellipse cx="420" cy="225" rx="150" ry="72" fill="none" stroke="#dc2626" stroke-width="26"/>
+    <ellipse cx="360" cy="145" rx="78" ry="142" fill="none" stroke="#16a34a" stroke-width="26"/>
+
+    <path d="M 272 173 C 328 156 388 155 448 176" fill="none" stroke="#f8fafc" stroke-width="32" stroke-linecap="round"/>
+    <path d="M 272 173 C 328 156 388 155 448 176" fill="none" stroke="#2563eb" stroke-width="26" stroke-linecap="round"/>
+
+    <path d="M 476 274 C 416 291 354 290 294 270" fill="none" stroke="#f8fafc" stroke-width="32" stroke-linecap="round"/>
+    <path d="M 476 274 C 416 291 354 290 294 270" fill="none" stroke="#dc2626" stroke-width="26" stroke-linecap="round"/>
+
+    <path d="M 365 64 C 389 113 389 179 365 224" fill="none" stroke="#f8fafc" stroke-width="32" stroke-linecap="round"/>
+    <path d="M 365 64 C 389 113 389 179 365 224" fill="none" stroke="#16a34a" stroke-width="26" stroke-linecap="round"/>
+  </g>
+
+  <g font-family="Arial, Helvetica, sans-serif" fill="#334155">
+    <text x="70" y="362" font-size="16">Brunnian test:</text>
+    <text x="190" y="362" font-size="16">delete any one component -> remaining sublink is an unlink</text>
+  </g>
+</svg>
