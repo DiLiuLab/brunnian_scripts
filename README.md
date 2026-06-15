@@ -3,6 +3,29 @@
 This repository contains cleaned SnapPy scripts for determining Brunnian and
 Borromean links and for checking candidate duplicate links.
 
+## Get The Code
+
+Clone the repository the first time you want a local copy:
+
+```bash
+git clone https://github.com/DiLiuLab/brunnian_scripts.git
+cd brunnian_scripts
+```
+
+`git clone` downloads the repository and creates a local `brunnian_scripts`
+folder. The `cd` command moves your terminal into that folder so you can run
+the scripts.
+
+If you already cloned the repository, update your local copy with:
+
+```bash
+git pull
+```
+
+`git pull` fetches the newest commits from GitHub and merges them into your
+current local branch. Run it from inside the `brunnian_scripts` folder before
+using the scripts if you want the latest README, examples, and results.
+
 ## Properties
 
 A link is **Brunnian** if the full link is nontrivial, but removing any one
