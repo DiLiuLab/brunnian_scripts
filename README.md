@@ -61,15 +61,17 @@ are not unknots.
 ## Illustrated Examples
 
 The following examples are chosen from the generated screening files in
-`Run_results/`. The drawings are schematic illustrations of the link-property
-patterns, not exact SnapPy projections.
+`Run_results/`. The diagrams are Knotscape images hosted by Knot Atlas, rather
+than hand-drawn schematics.
 
 `L6a4` appears in both `ht_screening_brunnian_nr.csv` and
 `ht_screening_borromean_nr.csv` with `is_brunnian=True` and
 `is_borromean=True`. It is the classical Borromean rings: the full 3-component
 link is nontrivial, but deleting any one ring leaves a 2-component unlink.
 
-![Schematic illustration of the Borromean rings as a Brunnian link](Examples/illustrations/brunnian_borromean_rings.svg)
+![Knot Atlas Knotscape image of L6a4, the Borromean rings](https://katlas.org/images/7/7a/L6a4.gif)
+
+Source: [Knot Atlas L6a4](https://katlas.org/wiki/L6a4).
 
 `L10n107` appears in `ht_screening_borromean_nr.csv` with
 `is_borromean=True` and `is_brunnian=False`. It is a 4-component example where
@@ -77,7 +79,9 @@ every 2-component sublink is an unlink, but at least one larger proper sublink
 is still nontrivial. This illustrates why the generalized Borromean condition
 is weaker than the Brunnian condition for links with more than 3 components.
 
-![Schematic illustration of a Borromean but not Brunnian link](Examples/illustrations/borromean_not_brunnian.svg)
+![Knot Atlas Knotscape image of L10n107, a Borromean but not Brunnian link](https://katlas.org/images/4/4e/L10n107.gif)
+
+Source: [Knot Atlas L10n107](https://katlas.org/wiki/L10n107).
 
 ## HT Table
 
