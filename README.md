@@ -104,11 +104,11 @@ least 3 components.
 - `determine_duplicate_links.py`
   - checks candidate duplicate links by comparing non-geometric exteriors
   - accepts one group via `--links` or groups from `--input-file`
-- `BL_DTV2.py`
+- `BL_DTv2_1.py`
   - `V2_1` DT-code generator for four Brunnian-link construction families
   - accepts `--pattern` and `--n` in CLI mode
   - opens a Tkinter GUI when run without arguments or with `--gui`
-  - displays pattern snapshots from `Assets/`
+  - displays 7-component pattern example snapshots from `Assets/` when available
 
 ## Examples
 
@@ -161,25 +161,27 @@ python3 determine_duplicate_links.py --input-file Examples/duplicate_candidate_g
 Generate a DT code from one of the four construction families:
 
 ```bash
-python3 BL_DTV2.py --pattern cyclic_larks --n 5
+python3 BL_DTv2_1.py --pattern cyclic_larks --n 7
 ```
 
 Open the GUI:
 
 ```bash
-python3 BL_DTV2.py
+python3 BL_DTv2_1.py
 ```
 
 List accepted canonical pattern names:
 
 ```bash
-python3 BL_DTV2.py --list-patterns
+python3 BL_DTv2_1.py --list-patterns
 ```
 
-## BL_DTV2 V2_1 Pattern Snapshots
+## BL_DTv2_1 V2_1 Pattern Snapshots
 
-The GUI uses these snapshots from `Assets/`; `cyclic larks.png` is also used
-as the Tkinter app icon when the platform supports PNG window icons.
+The GUI uses these 7-component example snapshots from `Assets/` when they are
+available; `cyclic larks.png` is also used as the Tkinter app icon when the
+platform supports PNG window icons. The script still runs if these image files
+are missing.
 
 | Pattern | Snapshot |
 | --- | --- |

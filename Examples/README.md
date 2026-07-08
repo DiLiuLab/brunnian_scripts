@@ -57,11 +57,12 @@ python3 determine_duplicate_links.py --input-file Examples/duplicate_candidate_g
 Generate a DT code from a Brunnian-link construction family:
 
 ```bash
-python3 BL_DTV2.py --pattern cyclic_larks --n 5
+python3 BL_DTv2_1.py --pattern cyclic_larks --n 7
 ```
 
-Run the `BL_DTV2` GUI, which includes snapshots for all four patterns:
+Run the `BL_DTv2_1` GUI, which includes 7-component example snapshots for all
+four patterns when the image files are available:
 
 ```bash
-python3 BL_DTV2.py
+python3 BL_DTv2_1.py
 ```

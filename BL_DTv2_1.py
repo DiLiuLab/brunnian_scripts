@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# BL_DTV2.py
+# BL_DTv2_1.py
 # Version: V2_1
 # Generate signed DT codes and generalized formulas for four Brunnian-link
 # construction families. Inputs: a pattern name and component number n.
 # Outputs: the selected generalized formula and the corresponding DT code.
-# Example: python BL_DTV2.py --pattern cyclic_larks --n 5
+# Example: python BL_DTv2_1.py --pattern cyclic_larks --n 7
 
 import argparse
 import os
@@ -14,6 +14,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 Component = Tuple[int, ...]
 DTCode = List[Component]
 VERSION = "V2_1"
+APP_NAME = "BL_DTv2_1"
+PREVIEW_EXAMPLE_COMPONENTS = 7
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(BASE_DIR, "Assets")
 APP_ICON_FILENAME = "cyclic larks.png"
@@ -343,7 +345,7 @@ def run_gui() -> None:
         raise RuntimeError("Tkinter GUI is not available in this Python environment: {}".format(exc))
 
     root = tk.Tk()
-    root.title("BL_DTV2 {}: Brunnian-link DT code generator".format(VERSION))
+    root.title("{} {}: Brunnian-link DT code generator".format(APP_NAME, VERSION))
     root.geometry("1180x760")
 
     try:
@@ -363,7 +365,7 @@ def run_gui() -> None:
     n_label = tk.Label(root, text="Number of components, n")
     n_label.grid(row=0, column=2, sticky="w", padx=10, pady=(10, 4))
 
-    n_var = tk.StringVar(value="5")
+    n_var = tk.StringVar(value="7")
     n_entry = tk.Entry(root, textvariable=n_var, width=10)
     n_entry.grid(row=0, column=3, sticky="w", padx=10, pady=(10, 4))
 
@@ -432,14 +434,17 @@ def run_gui() -> None:
         return photo
 
     def update_preview(pattern: str) -> None:
-        preview_title_var.set(PATTERN_TITLES[pattern])
+        preview_title_var.set("{} ({}-component example)".format(PATTERN_TITLES[pattern], PREVIEW_EXAMPLE_COMPONENTS))
         try:
             photo = load_pattern_photo(pattern)
             preview_state["photo"] = photo
             preview_image_label.configure(image=photo, text="")
         except Exception:
             preview_state["photo"] = None
-            preview_image_label.configure(image="", text="Snapshot unavailable")
+            preview_image_label.configure(
+                image="",
+                text="{}-component snapshot unavailable".format(PREVIEW_EXAMPLE_COMPONENTS),
+            )
 
     def update_output(show_popup: bool = False) -> None:
         try:
@@ -459,7 +464,7 @@ def run_gui() -> None:
             clear_and_insert(dt_text, "Error: {}\n".format(exc))
             status_var.set("Fix the input to update the DT code.")
             if show_popup:
-                messagebox.showerror("BL_DTV2 error", str(exc))
+                messagebox.showerror("{} error".format(APP_NAME), str(exc))
 
     def schedule_update(*_args) -> None:
         job = pending_update.get("job")
@@ -476,9 +481,9 @@ def run_gui() -> None:
             n = current_n()
             default_name = os.path.basename(default_output_path(pattern_var.get(), n))
         except Exception:
-            default_name = "BL_DTV2_output.txt"
+            default_name = "{}_output.txt".format(APP_NAME)
         path = filedialog.asksaveasfilename(
-            title="Save BL_DTV2 output",
+            title="Save {} output".format(APP_NAME),
             initialfile=default_name,
             defaultextension=".txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
@@ -486,9 +491,9 @@ def run_gui() -> None:
         if path:
             try:
                 write_text(path, current_output["text"])
-                messagebox.showinfo("BL_DTV2", "Saved to {}".format(path))
+                messagebox.showinfo(APP_NAME, "Saved to {}".format(path))
             except Exception as exc:
-                messagebox.showerror("BL_DTV2 error", str(exc))
+                messagebox.showerror("{} error".format(APP_NAME), str(exc))
 
     refresh_button = tk.Button(button_frame, text="Refresh", command=lambda: update_output(show_popup=True))
     refresh_button.pack(side="left", padx=(0, 8))
@@ -509,7 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate DT codes for four Brunnian-link construction families. Version: {}".format(VERSION)
     )
-    parser.add_argument("--version", action="version", version="BL_DTV2 {}".format(VERSION))
+    parser.add_argument("--version", action="version", version="{} {}".format(APP_NAME, VERSION))
     parser.add_argument(
         "--pattern",
         "-p",
@@ -543,7 +548,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         except Exception as exc:
             print("GUI could not be started: {}".format(exc), file=sys.stderr)
-            print("Use CLI mode, for example: python BL_DTV2.py --pattern cyclic_larks --n 5", file=sys.stderr)
+            print("Use CLI mode, for example: python BL_DTv2_1.py --pattern cyclic_larks --n 7", file=sys.stderr)
             return 1
 
     if args.pattern is None or args.n is None:
