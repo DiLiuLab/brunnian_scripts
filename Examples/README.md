@@ -53,3 +53,15 @@ Check duplicate-link candidate groups:
 ```bash
 python3 determine_duplicate_links.py --input-file Examples/duplicate_candidate_groups.txt --output Run_results/duplicate_candidate_groups.csv
 ```
+
+Generate a DT code from a Brunnian-link construction family:
+
+```bash
+python3 BL_DTV2.py --pattern cyclic_larks --n 5
+```
+
+Run the `BL_DTV2` GUI, which includes snapshots for all four patterns:
+
+```bash
+python3 BL_DTV2.py
+```
