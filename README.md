@@ -183,12 +183,15 @@ available; `cyclic larks.png` is also used as the Tkinter app icon when the
 platform supports PNG window icons. The script still runs if these image files
 are missing.
 
+The figures were prepared with the `draw_dt_original_labels` tool in
+[DiLiuLab/dt_strand_passage_explorer](https://github.com/DiLiuLab/dt_strand_passage_explorer).
+
 | Pattern | Snapshot |
 | --- | --- |
-| Cyclic squares | ![Cyclic squares Brunnian-link construction snapshot](Assets/cyclic%20squares.png) |
-| Cyclic larks | ![Cyclic larks Brunnian-link construction snapshot](Assets/cyclic%20larks.png) |
-| Cyclic rubberband | ![Cyclic rubberband Brunnian-link construction snapshot](Assets/cyclic%20rubberband.png) |
-| Linear rubberband | ![Linear rubberband Brunnian-link construction snapshot](Assets/linear%20rubberband.png) |
+| Cyclic squares | <img src="Assets/cyclic%20squares.png" alt="Cyclic squares Brunnian-link construction snapshot" width="571"> |
+| Cyclic larks | <img src="Assets/cyclic%20larks.png" alt="Cyclic larks Brunnian-link construction snapshot" width="575"> |
+| Cyclic rubberband | <img src="Assets/cyclic%20rubberband.png" alt="Cyclic rubberband Brunnian-link construction snapshot" width="563"> |
+| Linear rubberband | <img src="Assets/linear%20rubberband.png" alt="Linear rubberband Brunnian-link construction snapshot" width="780"> |
 
 ## Screening Results
 
