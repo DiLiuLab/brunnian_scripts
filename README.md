@@ -119,8 +119,11 @@ least 3 components.
     `mirror_fishtail` (aliases `v2_2_fishtail`, `twisted_fishtail`). The two
     share all 16 unsigned entries and differ in 8 signs; they are distinct
     links (n = 5 volumes 91.7463 vs 92.7683).
-- `BL_DTv2_1.py`, `BL_DTv2_2.py`
-  - earlier versions, kept for reproducibility of previously generated output
+- `previous/`
+  - earlier versions, including `BL_DTv2_1.py` and `BL_DTv2_2.py`, kept for
+    reproducibility of previously generated output
+  - this directory is listed in `.gitignore`, so it is a local archive rather
+    than part of the repository; a fresh clone will not contain it
 
 ## Examples
 
