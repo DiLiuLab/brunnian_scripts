@@ -104,11 +104,23 @@ least 3 components.
 - `determine_duplicate_links.py`
   - checks candidate duplicate links by comparing non-geometric exteriors
   - accepts one group via `--links` or groups from `--input-file`
-- `BL_DTv2_1.py`
-  - `V2_1` DT-code generator for four Brunnian-link construction families
-  - accepts `--pattern` and `--n` in CLI mode
+- `BL_DTv2_3.py` (current)
+  - `V2_3` DT-code generator for **eight** link-construction families: the four
+    Brunnian series, Edwards' Venn (`AM_n`), Brunn's classic (`BR_n`), the
+    Fishtail bracelet, and the Mirror fishtail
+  - accepts `--pattern` and `--n` in CLI mode; `--list-patterns` to enumerate
   - opens a Tkinter GUI when run without arguments or with `--gui`
-  - displays 7-component pattern example snapshots from `Assets/` when available
+  - defaults: n = 7 for the four original families, n = 5 for the rest
+  - **V2_3 correction:** V2_2 and earlier emitted the *mirrored* stitch under
+    the name `fishtail`. The true fishtail is the same-fold wrap, identified by
+    the fact that its grip-span-1 reduction is the classical chain
+    (= `cyclic_rubberband`); the mirrored rule fails that test. `fishtail` now
+    emits the corrected code and the old code remains available as
+    `mirror_fishtail` (aliases `v2_2_fishtail`, `twisted_fishtail`). The two
+    share all 16 unsigned entries and differ in 8 signs; they are distinct
+    links (n = 5 volumes 91.7463 vs 92.7683).
+- `BL_DTv2_1.py`, `BL_DTv2_2.py`
+  - earlier versions, kept for reproducibility of previously generated output
 
 ## Examples
 
@@ -124,6 +136,18 @@ Single DT code:
 
 ```bash
 python3 determine_brunnian_borromean.py --link-string "DT: [(-8,-12,16),(-24,-22,-28,-26),(-10,-14,-2),(-20,-6,-18,-4)]" --property brunnian --method nr
+```
+
+Five-component DT-code example that is both Brunnian and Borromean:
+
+```bash
+python3 determine_brunnian_borromean.py --link-string "DT: [(32,18,20,22,24,26,28,30),(34,52,36,54,40,50,42,58),(2,46,6,10,48,14),(4,56,12,60),(-38,8,16,-44)]" --property both --method nr
+```
+
+Expected output:
+
+```text
+DT: [(32,18,20,22,24,26,28,30),(34,52,36,54,40,50,42,58),(2,46,6,10,48,14),(4,56,12,60),(-38,8,16,-44)]: Brunnian=True, Borromean=True
 ```
 
 HT screening:
@@ -161,37 +185,55 @@ python3 determine_duplicate_links.py --input-file Examples/duplicate_candidate_g
 Generate a DT code from one of the four construction families:
 
 ```bash
-python3 BL_DTv2_1.py --pattern cyclic_larks --n 7
+python3 BL_DTv2_3.py --pattern cyclic_larks --n 7
+```
+
+Generate the corrected fishtail code (and the mirrored variant):
+
+```bash
+python3 BL_DTv2_3.py --pattern fishtail --n 5
+python3 BL_DTv2_3.py --pattern mirror_fishtail --n 5
 ```
 
 Open the GUI:
 
 ```bash
-python3 BL_DTv2_1.py
+python3 BL_DTv2_3.py
 ```
 
 List accepted canonical pattern names:
 
 ```bash
-python3 BL_DTv2_1.py --list-patterns
+python3 BL_DTv2_3.py --list-patterns
 ```
 
-## BL_DTv2_1 V2_1 Pattern Snapshots
+## BL_DT Pattern Snapshots
 
-The GUI uses these 7-component example snapshots from `Assets/` when they are
-available; `cyclic larks.png` is also used as the Tkinter app icon when the
+The GUI shows an example snapshot from `Assets/` for the selected pattern:
+7 components for the four original Brunnian families, 5 for the four added
+later. `cyclic larks.png` is also used as the Tkinter app icon when the
 platform supports PNG window icons. The script still runs if these image files
 are missing.
+
+**Note (July 2026):** `Assets/fishtail.png` previously showed the *mirrored*
+stitch, matching the V2_2 code. It now shows the true fishtail, and the old
+figure is kept as `Assets/mirror fishtail.png` for the `mirror_fishtail`
+pattern.
 
 The figures were prepared with the `draw_dt_original_labels` tool in
 [DiLiuLab/dt_strand_passage_explorer](https://github.com/DiLiuLab/dt_strand_passage_explorer).
 
 | Pattern | Snapshot |
 | --- | --- |
-| Cyclic squares | <img src="Assets/cyclic%20squares.png" alt="Cyclic squares Brunnian-link construction snapshot" width="571"> |
-| Cyclic larks | <img src="Assets/cyclic%20larks.png" alt="Cyclic larks Brunnian-link construction snapshot" width="575"> |
-| Cyclic rubberband | <img src="Assets/cyclic%20rubberband.png" alt="Cyclic rubberband Brunnian-link construction snapshot" width="563"> |
-| Linear rubberband | <img src="Assets/linear%20rubberband.png" alt="Linear rubberband Brunnian-link construction snapshot" width="780"> |
+| Cyclic squares | ![Cyclic squares Brunnian-link construction snapshot](Assets/readme_previews/cyclic_squares.png) |
+| Cyclic larks | ![Cyclic larks Brunnian-link construction snapshot](Assets/readme_previews/cyclic_larks.png) |
+| Cyclic rubberband | ![Cyclic rubberband Brunnian-link construction snapshot](Assets/readme_previews/cyclic_rubberband.png) |
+| Linear rubberband | ![Linear rubberband Brunnian-link construction snapshot](Assets/readme_previews/linear_rubberband.png) |
+
+Snapshots for the four families added in V2_2/V2_3 live in `Assets/` as
+`Edward.png` (Edwards' Venn), `Brunn.png` (Brunn's classic), `fishtail.png`
+(the true fishtail) and `mirror fishtail.png` (the mirrored variant); they are
+not reproduced in this table.
 
 ## Screening Results
 
