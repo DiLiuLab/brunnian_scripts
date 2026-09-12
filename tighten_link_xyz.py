@@ -463,6 +463,19 @@ def read_metric_log(run_dir: Path, name: str, column: int = 1) -> dict[int, floa
     return values
 
 
+def nearest_logged(series: dict[int, float], step: int) -> float | None:
+    """Value at the logged step closest to `step`.
+
+    RidgeRunner decimates its logfiles as a run grows -- a long run logs only
+    every other step, or coarser -- so a snapshot's step number is usually
+    absent from them. Looking it up exactly and falling back to the last
+    logged step would describe the wrong configuration entirely.
+    """
+    if not series:
+        return None
+    return series[min(series, key=lambda logged: abs(logged - step))]
+
+
 def window_median(series: dict[int, float], centre: int, window: int) -> float | None:
     """Median of a logged quantity within +/- window steps of centre."""
     nearby = [v for step, v in series.items() if abs(step - centre) <= window]
@@ -520,7 +533,7 @@ def choose_configuration(run_dir: Path, stem: str) -> tuple[Path, str] | None:
     def score(step: int) -> tuple[float, float]:
         return (
             window_median(residual, step, SELECTION_WINDOW) or 1.0,
-            ropelength.get(step, float("inf")),
+            nearest_logged(ropelength, step) or float("inf"),
         )
 
     best_step, best_path = min(candidates, key=lambda item: score(item[0]))
@@ -528,7 +541,7 @@ def choose_configuration(run_dir: Path, stem: str) -> tuple[Path, str] | None:
 
     def describe_step(step: int) -> str:
         res = window_median(residual, step, SELECTION_WINDOW)
-        rope = ropelength.get(step)
+        rope = nearest_logged(ropelength, step)
         active = window_median(struts, step, SELECTION_WINDOW)
         parts = [f"step {step}"]
         if rope is not None:
@@ -681,7 +694,7 @@ def tighten(
     run_dir = work_dir / f"{stem}.rr"
 
     saved_vect = None
-    if args.select == "best":
+    if args.select in {"best", "both"}:
         chosen = choose_configuration(run_dir, stem)
         if chosen is not None:
             saved_vect, note = chosen
@@ -712,9 +725,10 @@ def tighten(
     rope_log = read_metric_log(run_dir, "ropelength")
     if rope_log:
         chosen_step = configuration_step(saved_vect, stem)
-        if chosen_step is None or chosen_step not in rope_log:
+        if chosen_step is None:
             chosen_step = max(rope_log)
-        ropelength = (rope_log[min(rope_log)], rope_log[chosen_step])
+        end = nearest_logged(rope_log, chosen_step)
+        ropelength = (rope_log[min(rope_log)], end) if end is not None else None
     if ropelength is None:
         ropelength = ropelength_from_output(captured)
 
@@ -727,6 +741,21 @@ def tighten(
 
     say(f"Tightened: {describe(tightened)}")
     say(f"Wrote {output_path}")
+
+    if args.select == "both":
+        final_vect = run_dir / f"{stem}.final.vect"
+        if not final_vect.is_file():
+            say("No final.vect to write alongside: the run did not finish.")
+        elif final_vect == saved_vect:
+            say("Not writing a separate _final file: the best configuration is the final one.")
+        else:
+            final_path = output_path.with_name(f"{output_path.stem}_final{output_path.suffix}")
+            final_components = read_vect(final_vect)
+            write_xyz(final_path, final_components, args.decimals)
+            last = max(rope_log) if rope_log else None
+            detail = f" (ropelength {rope_log[last]:.4f})" if last is not None else ""
+            say(f"Wrote {final_path}: the run's last configuration{detail}, "
+                f"{describe(final_components)}")
     if cancelled:
         say("The run was stopped early, so this is a saved configuration rather than a converged one.")
 
@@ -1100,11 +1129,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--select",
-        choices=("best", "final"),
+        choices=("best", "final", "both"),
         default="best",
         help="Which saved configuration to convert. 'best' (default) scores every snapshot on its "
         "windowed median residual and rolls back if the run degenerated after its best state; "
-        "'final' always keeps the last one.",
+        "'final' always keeps the last one; 'both' writes the best to the output path and the "
+        "last one alongside it as <output stem>_final.xyz, for comparison.",
     )
     run.add_argument(
         "--snapshot-interval",
