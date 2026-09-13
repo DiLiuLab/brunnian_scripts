@@ -618,10 +618,15 @@ def choose_configuration(run_dir: Path, stem: str) -> tuple[Path, str] | None:
     measure) and strut count (how much of the curve is actually in contact).
     Ranking on residual alone gets both directions wrong, as observed:
 
-      * a final configuration better on ropelength, residual AND struts was
-        rejected because its residual ratio missed ROLLBACK_MARGIN by 0.026;
-      * rollbacks fired onto snapshots 3 to 11 ropelength units worse than the
-        final, purely because their residual was lower.
+      * rollbacks fired onto snapshots 3.1 to 11.3 ropelength units worse than
+        the final they discarded, across four runs, purely because those
+        snapshots had a lower residual;
+      * and a configuration that beat the final on ropelength (217.19 against
+        243.71), residual (0.400 against 0.424) and struts (119 against 88) was
+        never even weighed, because the argmin over residual landed on a
+        different snapshot entirely (step 192000, ropelength 220.94), whose own
+        ratio of 0.934 then failed the margin. Being better on every measure
+        bought nothing, because nothing looked.
 
     So dominance decides first: a candidate better on all three is taken, and
     one worse on all three is refused, both without consulting the margin. Only
@@ -673,8 +678,19 @@ def choose_configuration(run_dir: Path, stem: str) -> tuple[Path, str] | None:
         return ", ".join(parts)
 
     if not final_present:
-        # An unfinished run has no final.vect at all; the best snapshot is
-        # simply the best thing available.
+        # A killed or crashed run has no final.vect, so there is no incumbent to
+        # test dominance against. Rank the snapshots among themselves instead of
+        # falling back to the residual argmin this rule exists to replace: keep
+        # only those no other snapshot dominates, and take the shortest of them.
+        scored = [(step, path, metrics(step)) for step, path in candidates]
+        front = [(m[0], step, path) for step, path, m in scored
+                 if not any(dominates(other, m) for _, _, other in scored)]
+        if front:
+            _, step, path = min(front)
+            return path, (
+                f"Run did not finish. Of the snapshots no other snapshot beats outright, "
+                f"using the shortest: {describe_step(step)}."
+            )
         return best_path, (
             f"Run did not finish. Using the best snapshot: {describe_step(best_step)}."
         )
