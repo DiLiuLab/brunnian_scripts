@@ -86,9 +86,9 @@ class RunCancelled(TightenError):
     def __init__(self, message: str, captured: list[str] | None = None) -> None:
         super().__init__(message)
         self.captured = captured or []
-        # Set when the run was stopped because its linear algebra degenerated,
-        # rather than by the user.
-        self.degenerate = False
+        # Set to a short reason when the run was stopped because it
+        # degenerated, rather than by the user.
+        self.degenerate: str | None = None
 
 
 def read_xyz(path: Path) -> list[Component]:
@@ -323,26 +323,116 @@ def build_ridgerunner_command(binary: str, vect_name: str, args) -> list[str]:
 DEGENERATE_MARKER = "Linear algebra failure"
 
 
+# A run that sheds most of its self-contacts has come apart and does not get
+# them back. The raw per-step count is useless for detecting this: it spikes to
+# near zero constantly even in healthy runs, so a rule on raw values fires
+# within the first hundred steps of everything. These thresholds work on the
+# median of each COLLAPSE_BIN-step block instead.
+#
+# Calibrated against seven completed runs (three that collapsed, four that did
+# not). Only two settings separated them at all, so the margin is thin and this
+# check is opt-in via --stop-on-collapse rather than on by default: a false
+# positive truncates a healthy run, whereas a missed collapse only wastes time
+# that --select best already recovers from.
+COLLAPSE_BIN = 500
+COLLAPSE_FRACTION = 0.2
+COLLAPSE_MIN_PEAK = 50
+COLLAPSE_CONFIRM_BINS = 10
+
+
+def _tail_new_lines(path: Path, state: dict) -> list[str]:
+    """Return complete lines added to path since the last call."""
+    try:
+        if not path.is_file():
+            return []
+        with path.open("r", errors="ignore") as handle:
+            handle.seek(state.get("offset", 0))
+            chunk = handle.read()
+            state["offset"] = handle.tell()
+    except OSError:
+        return []
+
+    text = state.get("pending", "") + chunk
+    lines = text.split("\n")
+    state["pending"] = lines.pop()  # the last piece may be half-written
+    return lines
+
+
 def watch_for_degeneracy(
-    log_path: Path, process: subprocess.Popen, flag: dict, stop: "threading.Event"
+    run_dir: Path,
+    stem: str,
+    process: subprocess.Popen,
+    flag: dict,
+    stop: "threading.Event",
+    watch_collapse: bool = False,
 ) -> None:
-    """Stop the run once ridgerunner reports a linear-algebra failure."""
-    offset = 0
+    """Stop the run when it degenerates, by either of two signals.
+
+    ridgerunner logs a linear-algebra failure when its constraint matrix
+    becomes unsolvable. A run can also lose its contact set without logging
+    anything at all; watching the strut count catches that silent case, but
+    only approximately, so it is opt-in.
+    """
+    log_state: dict = {}
+    strut_state: dict = {}
+    log_path = run_dir / f"{stem}.log"
+    strut_path = run_dir / "logfiles" / "strutcount.dat"
+
+    current_bin = None
+    bin_values: list[float] = []
+    peak = 0.0
+    below = 0
+
+    def collapsed(median: float) -> bool:
+        """Update the running peak and say whether the run has come apart."""
+        nonlocal peak, below
+        peak = max(peak, median)
+        if peak < COLLAPSE_MIN_PEAK:
+            return False
+        if median < COLLAPSE_FRACTION * peak:
+            below += 1
+            return below >= COLLAPSE_CONFIRM_BINS
+        below = 0
+        return False
+
     while not stop.wait(2.0):
-        try:
-            if not log_path.is_file():
-                continue
-            with log_path.open("r", errors="ignore") as handle:
-                handle.seek(offset)
-                chunk = handle.read()
-                offset = handle.tell()
-        except OSError:
+        for line in _tail_new_lines(log_path, log_state):
+            if DEGENERATE_MARKER in line:
+                flag["reason"] = "ridgerunner reported a linear-algebra failure"
+                if process.poll() is None:
+                    process.terminate()
+                return
+
+        if not watch_collapse:
             continue
-        if DEGENERATE_MARKER in chunk:
-            flag["degenerate"] = True
-            if process.poll() is None:
-                process.terminate()
-            return
+
+        for line in _tail_new_lines(strut_path, strut_state):
+            fields = line.split()
+            if len(fields) < 2:
+                continue
+            try:
+                step, struts = int(fields[0]), float(fields[1])
+            except ValueError:
+                continue
+
+            index = step // COLLAPSE_BIN
+            if current_bin is None:
+                current_bin = index
+            if index != current_bin and bin_values:
+                bin_values.sort()
+                median = bin_values[len(bin_values) // 2]
+                if collapsed(median):
+                    flag["reason"] = (
+                        f"the contact set collapsed: {median:.0f} struts against a peak "
+                        f"of {peak:.0f}, sustained over "
+                        f"{COLLAPSE_CONFIRM_BINS * COLLAPSE_BIN} steps"
+                    )
+                    if process.poll() is None:
+                        process.terminate()
+                    return
+                bin_values = []
+                current_bin = index
+            bin_values.append(struts)
 
 
 def run_ridgerunner(
@@ -351,7 +441,8 @@ def run_ridgerunner(
     quiet: bool,
     on_line: Callable[[str], None] | None = None,
     on_process: Callable[[subprocess.Popen], None] | None = None,
-    degenerate_log: Path | None = None,
+    degenerate_watch: tuple[Path, str] | None = None,
+    watch_collapse: bool = False,
 ) -> list[str]:
     """Run ridgerunner in work_dir, streaming its progress, and return output.
 
@@ -371,13 +462,13 @@ def run_ridgerunner(
     if on_process is not None:
         on_process(process)
 
-    flag: dict = {"degenerate": False}
+    flag: dict = {"reason": None}
     stop = threading.Event()
     watcher = None
-    if degenerate_log is not None:
+    if degenerate_watch is not None:
         watcher = threading.Thread(
             target=watch_for_degeneracy,
-            args=(degenerate_log, process, flag, stop),
+            args=(*degenerate_watch, process, flag, stop, watch_collapse),
             daemon=True,
         )
         watcher.start()
@@ -398,7 +489,7 @@ def run_ridgerunner(
         cancelled = RunCancelled(
             f"ridgerunner was stopped by signal {-returncode}.", captured
         )
-        cancelled.degenerate = flag["degenerate"]
+        cancelled.degenerate = flag["reason"]
         raise cancelled
     if returncode != 0:
         tail = "\n".join(captured[-25:])
@@ -438,6 +529,14 @@ SELECTION_WINDOW = 500
 # An earlier snapshot has to beat the final residual by more than this to be
 # worth rolling back to; otherwise the run keeps its last configuration.
 ROLLBACK_MARGIN = 0.8
+
+# Ropelength is the quantity being minimised, so a rollback that gives it up is
+# only worth making when the earlier configuration is better in every other way
+# too. Outside that case, refuse to trade away more than this fraction of it.
+# Measured cost of not having this guard: three runs in one afternoon whose
+# written output was 3 to 11 units worse than the final configuration they
+# discarded, because the rollback was decided on residual alone.
+ROLLBACK_ROPE_TOLERANCE = 0.02
 
 
 def read_metric_log(run_dir: Path, name: str, column: int = 1) -> dict[int, float]:
@@ -513,8 +612,21 @@ def choose_configuration(run_dir: Path, stem: str) -> tuple[Path, str] | None:
 
     A run without --EqOn can reach a very good state and then degenerate as
     edges collapse, so the last configuration is not always the best one.
-    Snapshots are scored on their windowed median residual - ridgerunner's own
-    convergence measure - with ropelength breaking ties.
+
+    Three quantities matter and they do not always agree: ropelength (the thing
+    being minimised), windowed median residual (ridgerunner's own convergence
+    measure) and strut count (how much of the curve is actually in contact).
+    Ranking on residual alone gets both directions wrong, as observed:
+
+      * a final configuration better on ropelength, residual AND struts was
+        rejected because its residual ratio missed ROLLBACK_MARGIN by 0.026;
+      * rollbacks fired onto snapshots 3 to 11 ropelength units worse than the
+        final, purely because their residual was lower.
+
+    So dominance decides first: a candidate better on all three is taken, and
+    one worse on all three is refused, both without consulting the margin. Only
+    genuine trade-offs fall through to the residual test, and even then a
+    rollback may not give up more than ROLLBACK_ROPE_TOLERANCE of ropelength.
     """
     residual = read_metric_log(run_dir, "residual")
     ropelength = read_metric_log(run_dir, "ropelength")
@@ -530,26 +642,34 @@ def choose_configuration(run_dir: Path, stem: str) -> tuple[Path, str] | None:
     if not candidates:
         return None
 
-    def score(step: int) -> tuple[float, float]:
+    def metrics(step: int) -> tuple[float, float, float]:
+        """(ropelength, residual, struts) - first two lower is better, third higher."""
         return (
-            window_median(residual, step, SELECTION_WINDOW) or 1.0,
             nearest_logged(ropelength, step) or float("inf"),
+            window_median(residual, step, SELECTION_WINDOW) or 1.0,
+            window_median(struts, step, SELECTION_WINDOW) or 0.0,
         )
+
+    def dominates(a: tuple[float, float, float], b: tuple[float, float, float]) -> bool:
+        """`a` is no worse than `b` on all three, and strictly better on one."""
+        no_worse = a[0] <= b[0] and a[1] <= b[1] and a[2] >= b[2]
+        strictly = a[0] < b[0] or a[1] < b[1] or a[2] > b[2]
+        return no_worse and strictly
+
+    def score(step: int) -> tuple[float, float]:
+        rope, res, _ = metrics(step)
+        return (res, rope)
 
     best_step, best_path = min(candidates, key=lambda item: score(item[0]))
     final_present = final_vect.is_file()
 
     def describe_step(step: int) -> str:
-        res = window_median(residual, step, SELECTION_WINDOW)
-        rope = nearest_logged(ropelength, step)
-        active = window_median(struts, step, SELECTION_WINDOW)
+        rope, res, active = metrics(step)
         parts = [f"step {step}"]
-        if rope is not None:
+        if rope != float("inf"):
             parts.append(f"ropelength {rope:.4f}")
-        if res is not None:
-            parts.append(f"residual {res:.4f}")
-        if active is not None:
-            parts.append(f"struts {active:.0f}")
+        parts.append(f"residual {res:.4f}")
+        parts.append(f"struts {active:.0f}")
         return ", ".join(parts)
 
     if not final_present:
@@ -562,14 +682,51 @@ def choose_configuration(run_dir: Path, stem: str) -> tuple[Path, str] | None:
     if best_path == final_vect:
         return final_vect, f"Best configuration is the final one ({describe_step(best_step)})."
 
-    # Residual jitters, so only roll back for a clear improvement. Giving up
-    # thousands of steps of progress to chase noise would be a bad trade.
-    best_residual = score(best_step)[0]
-    final_residual = score(final_step)[0]
-    if best_residual > ROLLBACK_MARGIN * final_residual:
+    final_metrics = metrics(final_step)
+
+    # A snapshot that beats the final on every measure is taken outright. This
+    # is the degenerate-run case the rollback exists for: the strut set
+    # collapses, residual goes to 1 and ropelength drifts back up, so the
+    # rescuing snapshot wins on all three at once and needs no margin test.
+    dominating = [
+        (metrics(step)[0], step, path)
+        for step, path in candidates
+        if path != final_vect and dominates(metrics(step), final_metrics)
+    ]
+    if dominating:
+        rope, step, path = min(dominating)
+        return path, (
+            f"Rolled back to a configuration that is better in every way: "
+            f"{describe_step(step)}.\n"
+            f"  The run ended worse on ropelength, residual and struts, at "
+            f"{describe_step(final_step)}. "
+            "Pass --select final to keep the last configuration instead."
+        )
+
+    best_metrics = metrics(best_step)
+    if dominates(final_metrics, best_metrics):
+        return final_vect, (
+            f"Keeping the final configuration ({describe_step(final_step)}): it is "
+            f"better in every way than the best snapshot ({describe_step(best_step)})."
+        )
+
+    # Neither dominates, so this is a real trade-off. Never buy a lower residual
+    # with a materially worse ropelength -- ropelength is the objective.
+    if best_metrics[0] > final_metrics[0] * (1.0 + ROLLBACK_ROPE_TOLERANCE):
         return final_vect, (
             f"Keeping the final configuration ({describe_step(final_step)}). "
-            f"The best snapshot (step {best_step}, residual {best_residual:.4f}) is not "
+            f"The best snapshot by residual (step {best_step}, "
+            f"ropelength {best_metrics[0]:.4f}) would give up "
+            f"{100 * (best_metrics[0] / final_metrics[0] - 1):.1f}% of ropelength "
+            "to get there."
+        )
+
+    # Residual jitters, so only roll back for a clear improvement. Giving up
+    # thousands of steps of progress to chase noise would be a bad trade.
+    if best_metrics[1] > ROLLBACK_MARGIN * final_metrics[1]:
+        return final_vect, (
+            f"Keeping the final configuration ({describe_step(final_step)}). "
+            f"The best snapshot (step {best_step}, residual {best_metrics[1]:.4f}) is not "
             "meaningfully better."
         )
 
@@ -671,11 +828,10 @@ def tighten(
             args.quiet,
             on_line=emit,
             on_process=on_process,
-            degenerate_log=(
-                work_dir / f"{stem}.rr" / f"{stem}.log"
-                if args.stop_on_failure
-                else None
+            degenerate_watch=(
+                (work_dir / f"{stem}.rr", stem) if args.stop_on_failure else None
             ),
+            watch_collapse=args.stop_on_collapse,
         )
     except RunCancelled as exc:
         # A stopped run is still worth salvaging: convert whatever
@@ -684,9 +840,9 @@ def tighten(
         captured = exc.captured
         if exc.degenerate:
             say(
-                "Stopped early: ridgerunner reported a linear-algebra failure, which "
-                "collapses the strut set and does not recover. Falling back to the best "
-                "saved configuration."
+                f"Stopped early: {exc.degenerate}. A run does not recover from this, so "
+                "the remaining steps would be wasted. Falling back to the best saved "
+                "configuration."
             )
         else:
             say(str(exc))
@@ -818,6 +974,8 @@ def run_gui() -> None:
         "png": tk.BooleanVar(value=defaults.png),
         "select_best": tk.BooleanVar(value=defaults.select == "best"),
         "stop_on_failure": tk.BooleanVar(value=defaults.stop_on_failure),
+        "stop_on_collapse": tk.BooleanVar(value=defaults.stop_on_collapse),
+        "also_final": tk.BooleanVar(value=False),
     }
 
     def add_row(parent, row, label, var, hint="", browse=None):
@@ -911,6 +1069,18 @@ def run_gui() -> None:
         text="Stop on linear-algebra failure",
         variable=flags["stop_on_failure"],
     ).pack(side="left", padx=(12, 0))
+    select_row2 = tk.Frame(run_frame)
+    select_row2.grid(row=6, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 4))
+    tk.Checkbutton(
+        select_row2,
+        text="Also write the final configuration (_final.xyz)",
+        variable=flags["also_final"],
+    ).pack(side="left")
+    tk.Checkbutton(
+        select_row2,
+        text="Stop when the contact set collapses (approximate)",
+        variable=flags["stop_on_collapse"],
+    ).pack(side="left", padx=(12, 0))
     add_row(run_frame, 1, "Output decimals", fields["decimals"])
     add_row(run_frame, 2, "Extra ridgerunner args", fields["rr_arg"],
             hint="passed through verbatim, e.g. --Timewarp")
@@ -956,32 +1126,41 @@ def run_gui() -> None:
             raise TightenError("Choose an input .xyz file first.")
         output = fields["output"].get().strip()
         work_dir = fields["work_dir"].get().strip()
-        return argparse.Namespace(
-            input=Path(source),
-            output=Path(output) if output else None,
-            work_dir=Path(work_dir) if work_dir else None,
-            steps=optional_number("steps", "Max steps", int),
-            stop_res=optional_number("stop_res", "Stop residual", float),
-            stop_time=optional_number("stop_time", "Stop time", int),
-            stop20=optional_number("stop20", "Stop20", float),
-            tube_radius=optional_number("tube_radius", "Tube radius", float),
-            stiffness=optional_number("stiffness", "Stiffness", float),
-            symmetry=fields["symmetry"].get().strip() or None,
-            decimals=optional_number("decimals", "Output decimals", int) or defaults.decimals,
-            rr_arg=fields["rr_arg"].get().split(),
-            ridgerunner=fields["ridgerunner"].get().strip() or None,
-            autoscale=flags["autoscale"].get(),
-            eq=flags["eq"].get(),
-            keep_run_dir=flags["keep_run_dir"].get(),
-            keep_snapshots=flags["keep_snapshots"].get(),
-            png=flags["png"].get(),
-            select="best" if flags["select_best"].get() else "final",
-            stop_on_failure=flags["stop_on_failure"].get(),
-            snapshot_interval=optional_number(
-                "snapshot_interval", "Snapshot interval", int
-            ),
-            quiet=True,  # output is streamed into the log pane instead
+
+        # Start from the parser's own defaults and override only what the GUI
+        # exposes, so an option added to the CLI later cannot be missing here.
+        settings = gui_defaults()
+        settings.input = Path(source)
+        settings.output = Path(output) if output else None
+        settings.work_dir = Path(work_dir) if work_dir else None
+        settings.steps = optional_number("steps", "Max steps", int)
+        settings.stop_res = optional_number("stop_res", "Stop residual", float)
+        settings.stop_time = optional_number("stop_time", "Stop time", int)
+        settings.stop20 = optional_number("stop20", "Stop20", float)
+        settings.tube_radius = optional_number("tube_radius", "Tube radius", float)
+        settings.stiffness = optional_number("stiffness", "Stiffness", float)
+        settings.symmetry = fields["symmetry"].get().strip() or None
+        settings.decimals = (
+            optional_number("decimals", "Output decimals", int) or defaults.decimals
         )
+        settings.rr_arg = fields["rr_arg"].get().split()
+        settings.ridgerunner = fields["ridgerunner"].get().strip() or None
+        settings.autoscale = flags["autoscale"].get()
+        settings.eq = flags["eq"].get()
+        settings.keep_run_dir = flags["keep_run_dir"].get()
+        settings.keep_snapshots = flags["keep_snapshots"].get()
+        settings.png = flags["png"].get()
+        settings.stop_on_failure = flags["stop_on_failure"].get()
+        settings.stop_on_collapse = flags["stop_on_collapse"].get()
+        settings.snapshot_interval = optional_number(
+            "snapshot_interval", "Snapshot interval", int
+        )
+        if not flags["select_best"].get():
+            settings.select = "final"
+        else:
+            settings.select = "both" if flags["also_final"].get() else "best"
+        settings.quiet = True  # output is streamed into the log pane instead
+        return settings
 
     def finish(error: str | None) -> None:
         run_button.configure(state="normal")
@@ -1118,6 +1297,14 @@ def build_parser() -> argparse.ArgumentParser:
         "and keeps a configuration stable, but it re-splines the curve, which repeatedly spikes ropelength "
         "and caps how low the residual gets. Without it a run reaches a much better residual but can later "
         "degenerate, which is what --select best is for.",
+    )
+    run.add_argument(
+        "--stop-on-collapse",
+        action="store_true",
+        help="Also stop the run when its strut count collapses, which is how a run degenerates "
+        "without ridgerunner logging anything. Off by default: the threshold was calibrated on "
+        "only seven runs and the margin is thin, so a false positive would truncate a healthy "
+        "run, while a missed collapse only wastes time that --select best recovers from.",
     )
     run.add_argument(
         "--no-stop-on-failure",
