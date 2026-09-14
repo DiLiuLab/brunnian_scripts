@@ -17,6 +17,16 @@ invisible. This uses the HOMFLYPT polynomial instead, via plCurve's
 HOMFLY is a necessary check, not a sufficient one: distinct links can share a
 polynomial, so a match is strong evidence rather than proof. A mismatch is
 conclusive -- the link changed.
+
+There is a third outcome, and conflating it with the second is dangerous.
+knottype can fail to produce a polynomial at all -- most often "lmpoly: too
+many crossings in knot", when the projection it picked has a more complicated
+diagram than lmpoly handles -- and it reports that as the literal text
+"(null)" on its normal output line. Treating that as a polynomial makes it
+compare unequal to the reference and read as a changed link, which would throw
+away a structure that is very likely fine. It is reported as UNKNOWN here.
+Retrying with a different --seed changes the projection and sometimes helps;
+tightening the structure first usually helps more.
 """
 
 from __future__ import annotations
@@ -32,6 +42,13 @@ from pathlib import Path
 from tighten_link_xyz import TightenError, read_xyz, write_vect
 
 HOMFLY_LINE = re.compile(r"Homfly polynomial:\((.*)\)")
+
+# knottype prints its failures on the same line it prints answers on.
+NO_POLYNOMIAL = {"(null)", "null", ""}
+
+
+class Uncomputable(TightenError):
+    """knottype ran but could not produce a polynomial. Not evidence of a change."""
 
 
 def find_knottype(explicit: str | None) -> str:
@@ -62,11 +79,18 @@ def homfly(path: Path, binary: str, timeout: int, seed: int) -> str:
         except subprocess.TimeoutExpired:
             raise TightenError(f"{path.name}: knottype timed out")
 
+    blob = result.stdout + result.stderr
     match = HOMFLY_LINE.search(result.stdout)
     if not match:
-        tail = (result.stdout + result.stderr).strip().splitlines()[-3:]
+        tail = blob.strip().splitlines()[-3:]
         raise TightenError(f"{path.name}: no HOMFLY in knottype output: {tail}")
-    return match.group(1).strip()
+    poly = match.group(1).strip()
+    if poly in NO_POLYNOMIAL:
+        why = next((ln.strip() for ln in blob.splitlines()
+                    if "lmpoly" in ln or "too many" in ln or "split" in ln.lower()),
+                   "knottype returned no polynomial")
+        raise Uncomputable(f"{path.name}: {why}")
+    return poly
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -91,12 +115,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  HOMFLY {reference}\n")
 
     changed = 0
+    unknown = 0
     for candidate in args.candidates:
         try:
             poly = homfly(candidate, binary, args.timeout, args.seed)
+        except Uncomputable as exc:
+            unknown += 1
+            print(f"  UNKNOWN {candidate.name}")
+            print(f"          {exc}")
+            continue
         except TightenError as exc:
+            unknown += 1
             print(f"  ERROR  {candidate.name}: {exc}")
-            changed += 1
             continue
         if poly == reference:
             print(f"  SAME   {candidate.name}")
@@ -109,9 +139,14 @@ def main(argv: list[str] | None = None) -> int:
     if changed:
         print(f"{changed} of {len(args.candidates)} differ from the reference and must not be "
               "compared against it on ropelength.")
-    else:
+    if unknown:
+        print(f"{unknown} of {len(args.candidates)} could not be checked. This is NOT evidence "
+              "of a change -- knottype failed to produce a polynomial, usually because the "
+              "projection it picked has too many crossings for lmpoly. Try another --seed, or "
+              "tighten the structure first and check the result.")
+    if not changed and not unknown:
         print("All candidates share the reference polynomial; no link change detected.")
-    return 1 if changed else 0
+    return 1 if changed or unknown else 0
 
 
 if __name__ == "__main__":
