@@ -300,6 +300,12 @@ def build_ridgerunner_command(binary: str, vect_name: str, args) -> list[str]:
         command.append(f"--Lambda={args.stiffness}")
     if args.symmetry:
         command.append(f"--Symmetry={args.symmetry}")
+    # Only meaningful with a patched ridgerunner; stock 2.3.1 has no such
+    # options and would reject them outright, so they are only sent when set.
+    if args.symmetry_axis:
+        command.append(f"--SymmetryAxis={args.symmetry_axis}")
+    if args.symmetry_ref:
+        command.append(f"--SymmetryRef={args.symmetry_ref}")
     if args.snapshot_interval is not None:
         command.append(f"--SnapshotInterval={args.snapshot_interval}")
     if not args.keep_snapshots:
@@ -997,6 +1003,8 @@ def run_gui() -> None:
         "tube_radius": tk.StringVar(),
         "stiffness": tk.StringVar(),
         "symmetry": tk.StringVar(),
+        "symmetry_axis": tk.StringVar(),
+        "symmetry_ref": tk.StringVar(),
         "decimals": tk.StringVar(value=str(defaults.decimals)),
         "snapshot_interval": tk.StringVar(),
         "rr_arg": tk.StringVar(),
@@ -1077,7 +1085,12 @@ def run_gui() -> None:
     geom_frame.pack(fill="x", padx=10, pady=4)
     add_row(geom_frame, 0, "Tube radius", fields["tube_radius"], hint="blank = ridgerunner default 0.5")
     add_row(geom_frame, 1, "Stiffness (Lambda)", fields["stiffness"], hint="min radius of curvature")
-    add_row(geom_frame, 2, "Symmetry group", fields["symmetry"], hint="e.g. Z/4Z, D2, cplanes; blank = none")
+    add_row(geom_frame, 2, "Symmetry group", fields["symmetry"],
+            hint="Z/4Z, D2, cplanes; patched build adds Ci, Cs, C2v, RD2; blank = none")
+    add_row(geom_frame, 3, "Symmetry axis", fields["symmetry_axis"],
+            hint="x,y,z; blank = 0,0,1. Needs a patched ridgerunner")
+    add_row(geom_frame, 4, "Symmetry reference dir", fields["symmetry_ref"],
+            hint="x,y,z; blank = 1,0,0. Only Cpv and RDp use it")
 
     run_frame = tk.LabelFrame(root, text="Run behaviour")
     run_frame.pack(fill="x", padx=10, pady=4)
@@ -1176,6 +1189,8 @@ def run_gui() -> None:
         settings.tube_radius = optional_number("tube_radius", "Tube radius", float)
         settings.stiffness = optional_number("stiffness", "Stiffness", float)
         settings.symmetry = fields["symmetry"].get().strip() or None
+        settings.symmetry_axis = fields["symmetry_axis"].get().strip() or None
+        settings.symmetry_ref = fields["symmetry_ref"].get().strip() or None
         settings.decimals = (
             optional_number("decimals", "Output decimals", int) or defaults.decimals
         )
@@ -1315,7 +1330,24 @@ def build_parser() -> argparse.ArgumentParser:
     geometry.add_argument(
         "--symmetry",
         metavar="GROUP",
-        help="Enforce a symmetry group about the z-axis, e.g. Z/4Z, D2 or cplanes (ridgerunner --Symmetry).",
+        help="Enforce a symmetry group (ridgerunner --Symmetry). Stock ridgerunner accepts Z/pZ, D2 "
+        "and cplanes, all about the z-axis. A ridgerunner built from ridgerunner_patches/ also accepts "
+        "Ci (inversion), Cs (one mirror), Cpv (e.g. C2v) and RDp (e.g. RD2, the real order-4 D2), about "
+        "any axis. Note that D2 is a single mirror, i.e. Cs, and not the D2 of molecular symmetry.",
+    )
+    geometry.add_argument(
+        "--symmetry-axis",
+        metavar="X,Y,Z",
+        help="Rotation axis for Z/pZ, Cpv and RDp, or the mirror normal for Cs/D2 (patched ridgerunner "
+        "--SymmetryAxis). Blank uses ridgerunner's default of 0,0,1. Stock ridgerunner has no such option "
+        "and always uses z, so the input has to be pre-aligned.",
+    )
+    geometry.add_argument(
+        "--symmetry-ref",
+        metavar="X,Y,Z",
+        help="Reference direction fixing where the first mirror plane (Cpv) or first 2-fold axis (RDp) "
+        "sits, projected perpendicular to the axis (patched ridgerunner --SymmetryRef). Blank uses 1,0,0. "
+        "symmetrize_link_xyz.py --group Cnv aligns its output to exactly that default.",
     )
 
     run = parser.add_argument_group("run behaviour")
