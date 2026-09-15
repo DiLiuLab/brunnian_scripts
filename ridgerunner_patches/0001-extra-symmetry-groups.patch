@@ -1,0 +1,605 @@
+--- a/src/ridgerunner_main.c
++++ b/src/ridgerunner_main.c
+@@ -36,7 +36,339 @@
+ 
+ double parse_size(const char *sizestring);
+ void parse_display_arg(search_state *inState, struct arg_str *display);
+-	
++
++/* ---------------------------------------------------------------------- */
++/* Extra symmetry groups: inversion (Ci), Cnv, and the real dihedral      */
++/* groups (RDn).                                                          */
++/*                                                                        */
++/* These live here rather than in plCurve so that a patched ridgerunner    */
++/* still links against an unmodified libplCurve. Everything used below is  */
++/* public API exported by the installed library.                          */
++/*                                                                        */
++/* Two properties of that library shape all of this.                       */
++/*                                                                        */
++/* First, plc_symmetrize averages each orbit as                            */
++/*                                                                        */
++/*     (1/n) sum_i  sym[inverse[i]]->transform * L[ sym[i]->target ]       */
++/*                                                                        */
++/* so the inverse table is load-bearing, not decoration. Leaving it at     */
++/* calloc's zeros applies the identity where g^-1 belongs, which averages  */
++/* the wrong points and quietly deforms the curve while still reporting a  */
++/* clean build.                                                            */
++/*                                                                        */
++/* Second, plc_build_symmetry has NO distance tolerance. It maps each      */
++/* vertex with the bare matrix, takes the nearest vertex to the image, and */
++/* fails only when two vertices claim the same target. A curve far from    */
++/* symmetric can therefore yield a perfectly injective but entirely wrong  */
++/* vertex map. Its own comment gives the real validity condition -- the    */
++/* curve must already be symmetric to within half an edge length -- so     */
++/* rr_symmetrize_and_report measures that BEFORE symmetrizing and warns.   */
++/* ---------------------------------------------------------------------- */
++
++static const double RR_PI = 3.14159265358979323846;
++
++/* plc_matrix_vector_multiply is exported by the library but not declared in
++   plCurve.h, so we do the multiply here rather than risk a mismatched
++   prototype. plc_matrix is double[3][3], row major. */
++static plc_vector rr_apply_matrix(plc_matrix *A,plc_vector v)
++{
++  return plc_build_vect((*A)[0][0]*v.c[0] + (*A)[0][1]*v.c[1] + (*A)[0][2]*v.c[2],
++			(*A)[1][0]*v.c[0] + (*A)[1][1]*v.c[1] + (*A)[1][2]*v.c[2],
++			(*A)[2][0]*v.c[0] + (*A)[2][1]*v.c[1] + (*A)[2][2]*v.c[2]);
++}
++
++/* Parse "x,y,z" into a non-degenerate vector. The trailing %c rejects
++   trailing junk instead of silently accepting a prefix. */
++static bool rr_parse_vector(const char *str,plc_vector *out)
++{
++  double x,y,z;
++  char tail;
++
++  if (str == NULL) { return false; }
++  if (sscanf(str,"%lf,%lf,%lf%c",&x,&y,&z,&tail) != 3) { return false; }
++
++  if (!isfinite(x) || !isfinite(y) || !isfinite(z)) { return false; }
++
++  *out = plc_build_vect(x,y,z);
++  return (isfinite(plc_norm(*out)) && plc_norm(*out) > 1e-12);
++}
++
++/* The component of ref perpendicular to axis, normalized. This is what fixes
++   where the first mirror plane (Cnv) or first 2-fold axis (RDn) sits. A ref
++   parallel to the axis carries no angular information, so substitute an
++   arbitrary perpendicular rather than fail. */
++static plc_vector rr_perp_to(plc_vector ref,plc_vector axis)
++{
++  plc_vector perp;
++
++  perp = plc_vect_diff(ref,plc_scale_vect(plc_dot_prod(ref,axis),axis));
++
++  if (plc_norm(perp) < 1e-9) {
++    perp = plc_vect_diff(plc_build_vect(1,0,0),plc_scale_vect(axis.c[0],axis));
++  }
++  if (plc_norm(perp) < 1e-9) {
++    perp = plc_vect_diff(plc_build_vect(0,1,0),plc_scale_vect(axis.c[1],axis));
++  }
++
++  return plc_normalize_vect(perp,NULL);
++}
++
++/* Ci = {E, -I}: inversion. Order 2.
++
++   The centre is the ORIGIN, not the centroid, because plc_build_symmetry
++   applies the bare matrix. An off-centre curve has no inversion symmetry as
++   far as this code can tell, however symmetric its shape, so centre the
++   input first. Autoscale is safe: plc_scale multiplies coordinates, so it
++   scales about the origin and a centred curve stays centred.
++
++   Inversion is orientation reversing, so a curve with this symmetry is
++   isotopic to its own mirror image -- only an amphichiral knot or link can
++   have it at all. */
++static plc_symmetry_group *rr_inversion_group(plCurve *L)
++{
++  plc_symmetry_group *build;
++  plc_matrix A;
++  int i,j;
++
++  build = plc_symmetry_group_new(2);
++  if (build == NULL) { return NULL; }
++
++  plc_identity_matrix(&A);
++  build->sym[0] = plc_build_symmetry(&A,L);
++
++  plc_identity_matrix(&A);
++  for(i=0;i<3;i++) { for(j=0;j<3;j++) { A[i][j] = -A[i][j]; } }
++  build->sym[1] = plc_build_symmetry(&A,L);
++
++  build->inverse[0] = 0;
++  build->inverse[1] = 1;  /* inversion is its own inverse */
++
++  for(i=0;i<2;i++) {
++    if (build->sym[i] == NULL) { plc_symmetry_group_free(&build); return NULL; }
++  }
++
++  return build;
++}
++
++/* Cnv: n-fold rotation about axis, plus the n mirrors that CONTAIN the axis.
++   Order 2n. C2v is n = 2.
++
++   Mirror normals are perpendicular to the axis and pi/n apart -- pi/n and
++   not 2pi/n, because the plane with normal m is the same plane as the one
++   with normal -m, so n distinct planes fill half a turn. The group closes:
++   the product of two adjacent mirrors is the rotation between them. */
++static plc_symmetry_group *rr_cnv_group(plCurve *L,plc_vector axis,plc_vector ref,int n)
++{
++  plc_symmetry_group *build;
++  plc_matrix A,R;
++  plc_vector normal;
++  int i;
++
++  if (n < 2) { return NULL; }
++
++  build = plc_symmetry_group_new(2*n);
++  if (build == NULL) { return NULL; }
++
++  /* Rotations C_n^i occupy slots 0..n-1. */
++  plc_identity_matrix(&A);
++  build->sym[0] = plc_build_symmetry(&A,L);
++  for(i=1;i<n;i++) {
++    plc_rotation_matrix(axis,i*(2.0*RR_PI/(double)(n)),&A);
++    build->sym[i] = plc_build_symmetry(&A,L);
++  }
++
++  /* Mirrors sigma_v^i occupy slots n..2n-1. */
++  for(i=0;i<n;i++) {
++    plc_rotation_matrix(axis,i*(RR_PI/(double)(n)),&R);
++    normal = rr_apply_matrix(&R,ref);
++    plc_reflection_matrix(normal,&A);
++    build->sym[n+i] = plc_build_symmetry(&A,L);
++  }
++
++  /* C_n^i inverts to C_n^(n-i); every mirror is an involution. */
++  build->inverse[0] = 0;
++  for(i=1;i<n;i++) { build->inverse[i] = n - i; }
++  for(i=0;i<n;i++) { build->inverse[n+i] = n + i; }
++
++  for(i=0;i<2*n;i++) {
++    if (build->sym[i] == NULL) { plc_symmetry_group_free(&build); return NULL; }
++  }
++
++  return build;
++}
++
++/* RDn: the real dihedral group. An n-fold principal axis plus n 2-fold axes
++   PERPENDICULAR to it. Order 2n, every element a proper rotation, with no
++   mirrors and no inversion.
++
++   This is the Dn of molecular symmetry, and it is precisely what
++   ridgerunner's existing "D2" is not: that option calls plc_reflection_group
++   and yields a single mirror -- Cs, order 2. RD2 is the genuine order-4 D2,
++   the Klein four-group of half turns about three perpendicular axes.
++
++   The 2-fold axes are pi/n apart for the same reason the Cnv mirrors are: a
++   2-fold axis along u is the same axis as along -u. */
++static plc_symmetry_group *rr_dihedral_group(plCurve *L,plc_vector axis,plc_vector ref,int n)
++{
++  plc_symmetry_group *build;
++  plc_matrix A,R;
++  plc_vector u2;
++  int i;
++
++  if (n < 2) { return NULL; }
++
++  build = plc_symmetry_group_new(2*n);
++  if (build == NULL) { return NULL; }
++
++  /* Rotations about the principal axis occupy slots 0..n-1. */
++  plc_identity_matrix(&A);
++  build->sym[0] = plc_build_symmetry(&A,L);
++  for(i=1;i<n;i++) {
++    plc_rotation_matrix(axis,i*(2.0*RR_PI/(double)(n)),&A);
++    build->sym[i] = plc_build_symmetry(&A,L);
++  }
++
++  /* Half turns about the n perpendicular axes occupy slots n..2n-1. */
++  for(i=0;i<n;i++) {
++    plc_rotation_matrix(axis,i*(RR_PI/(double)(n)),&R);
++    u2 = rr_apply_matrix(&R,ref);
++    plc_rotation_matrix(u2,RR_PI,&A);
++    build->sym[n+i] = plc_build_symmetry(&A,L);
++  }
++
++  build->inverse[0] = 0;
++  for(i=1;i<n;i++) { build->inverse[i] = n - i; }
++  for(i=0;i<n;i++) { build->inverse[n+i] = n + i; }  /* half turns are involutions */
++
++  for(i=0;i<2*n;i++) {
++    if (build->sym[i] == NULL) { plc_symmetry_group_free(&build); return NULL; }
++  }
++
++  return build;
++}
++
++/* plc_coordplanes_reflection_group only checks the first two of its four
++   elements for a failed build (its loop runs i<2 over a group of order 4), so
++   it can return a group carrying NULL entries that crash the moment anything
++   walks it. Check properly before trusting any group. */
++static bool rr_group_complete(plc_symmetry_group *G)
++{
++  int i;
++
++  if (G == NULL) { return false; }
++  for(i=0;i<G->n;i++) { if (G->sym[i] == NULL) { return false; } }
++  return true;
++}
++
++/* Match a group spec that carries an order, e.g. "C3v" against "C%dv%n".
++
++   Plain sscanf is not enough. On "C3" or "C3h" the %d is assigned and only
++   then does the literal 'v' fail to match, so sscanf still returns 1 and a
++   naive == 1 test accepts the prefix: --Symmetry=C3 silently built C3v and
++   --Symmetry=Z/2 silently built Z/2Z. A trailing %c catches junk that follows
++   a fully matched pattern but not junk that replaces the closing literal. %n
++   is the fix: it is not counted in sscanf's return value, and it is reached
++   only if every literal before it matched, so requiring it to land on the
++   terminating NUL rejects both a short prefix and a long tail. */
++static bool rr_match_order(const char *spec,const char *pattern,int *order)
++{
++  int used = -1;
++
++  if (spec == NULL) { return false; }
++  if (sscanf(spec,pattern,order,&used) != 1) { return false; }
++  return (used == (int)strlen(spec));
++}
++
++/* A group cannot have more elements than the curve has vertices to permute,
++   and an unbounded p also overflows the 2*p element count and walks straight
++   into plCurve's unchecked callocs -- --Symmetry=C1000000000v hangs the
++   process rather than failing. */
++static void rr_check_order_fits(const char *spec,int p,plCurve *L)
++{
++  int verts = plc_num_verts(L);
++  char errmsg[1024];
++
++  if (p > verts) {
++    snprintf(errmsg,sizeof(errmsg),
++	     "Symmetry group %.256s asks for order parameter %d, but the link has only %d\n"
++	     "  vertices, so no such symmetry can permute them. Aborting run.\n",
++	     spec,p,verts);
++    FatalError(errmsg, __FILE__, __LINE__);
++  }
++}
++
++/* Reject a degenerate order parameter.
++
++   This guards a crash that predates the patch: plc_symmetry_group_new returns
++   NULL for n <= 0, and plc_rotation_group then writes build->sym[0] without
++   checking, so stock ridgerunner segfaults outright on --Symmetry=Z/0Z or
++   Z/-2Z. The fix belongs in plCurve, but validating here turns the segfault
++   into a message without touching the library. */
++static void rr_symmetry_bad_order(const char *spec,int p,int least)
++{
++  char errmsg[1024];
++
++  snprintf(errmsg,sizeof(errmsg),
++	   "Symmetry group %.256s has order parameter %d; at least %d is required. Aborting run.\n"
++	   "  For a single mirror use Cs. For one 2-fold axis use Z/2Z.\n",
++	   spec,p,least);
++  FatalError(errmsg, __FILE__, __LINE__);
++}
++
++/* Abort with a uniform message when a group could not be built. */
++static void rr_symmetry_build_failed(const char *name)
++{
++  char errmsg[1024];
++  snprintf(errmsg,sizeof(errmsg),
++	  "Couldn't build %s symmetry on input link. Aborting run.\n"
++	  "  Every vertex is matched to the nearest vertex of its image, and the build\n"
++	  "  fails when two vertices claim the same target. That means the input is not\n"
++	  "  symmetric enough -- it has to be symmetric to within half an edge length.\n"
++	  "  Symmetrize the input first, and check the axis and reference direction.\n",
++	  name);
++  FatalError(errmsg, __FILE__, __LINE__);
++}
++
++/* Symmetrize, and report honestly enough to catch a bad vertex map.
++
++   The error has to be measured BEFORE symmetrizing. Afterwards it is ~0 by
++   construction -- plc_symmetrize forces every orbit into agreement -- so a
++   check on the symmetrized curve always passes and can never detect the one
++   thing worth detecting. plc_build_symmetry has no distance tolerance: it maps
++   each vertex with the bare matrix, takes the nearest vertex to the image, and
++   fails only when two vertices claim the same target. A curve far from
++   symmetric can hand back a perfectly injective but entirely wrong map, which
++   symmetrizing then bakes in. plCurve's own comment gives the real validity
++   condition -- symmetric already to within half an edge length -- so that is
++   what gets checked, on the curve as supplied. */
++static void rr_symmetrize_and_report(plCurve *L,const char *name)
++{
++  double before,after,mean_edge;
++  int verts,order;
++
++  order = (L->G == NULL) ? 0 : L->G->n;
++  verts = plc_num_verts(L);
++  mean_edge = (verts > 0) ? plc_arclength(L,NULL)/(double)(verts) : 0.0;
++
++  before = plc_symmetry_group_check(L);
++  plc_symmetrize(L);
++  after = plc_symmetry_group_check(L);
++
++  logprintf("Built %s symmetry (order %d) on link. Error before symmetrizing %g, after %g.\n",
++	    name,order,before,after);
++
++  if (mean_edge > 0.0 && before > 0.5*mean_edge) {
++
++    logprintf("WARNING: the input was off symmetry by %g, more than half its mean edge\n",before);
++    logprintf("         length (%g). Vertices are matched to the nearest vertex of their\n",0.5*mean_edge);
++    logprintf("         image and the build fails only on a collision, so a curve this far\n");
++    logprintf("         off can produce a valid-looking but wrong vertex map, which\n");
++    logprintf("         symmetrizing has now baked in. Treat this run as suspect and\n");
++    logprintf("         symmetrize the input first.\n");
++
++  }
++}
++
+ int
+ main( int argc, char* argv[] )
+ {
+@@ -160,9 +492,15 @@
+ 
+   struct arg_lit *arg_sfr = arg_lit0(NULL,"StrutFreeResidual","log the portion of residual on strut-free sections of curve");
+ 
+-  struct arg_str  *arg_symmetry = arg_strn(NULL,"Symmetry","Z/pZ,D2,cplanes",
+-					   0,1,"rotation/reflection symmetry group (around z-axis), or across all coordinate planes to enforce on curve");
++  struct arg_str  *arg_symmetry = arg_strn(NULL,"Symmetry","GROUP",
++					   0,1,"symmetry group to enforce: Z/pZ or Cp (the same thing: p-fold rotation), Ci (inversion), Cs (one mirror), Cpv (rotation + p mirrors through the axis; C2v is p=2), RDp (real dihedral: p-fold axis + p perpendicular 2-fold axes; RD2 is the genuine order-4 D2, unlike D2 itself), cplanes (reflections in all three coordinate planes), D2 (deprecated alias for Cs)");
+ 
++  struct arg_str  *arg_symaxis = arg_strn(NULL,"SymmetryAxis","x,y,z",
++					  0,1,"axis for --Symmetry: the rotation axis for Z/pZ, Cpv and RDp, or the mirror normal for Cs/D2 (default 0,0,1)");
++
++  struct arg_str  *arg_symref = arg_strn(NULL,"SymmetryRef","x,y,z",
++					 0,1,"reference direction fixing where the first mirror plane (Cpv) or first 2-fold axis (RDp) sits; projected perpendicular to the axis (default 1,0,0)");
++
+   struct arg_rem  *arg_bl8 = arg_rem("","");
+   struct arg_rem  *arg_dispopts = arg_rem("","Display Options");
+   struct arg_rem  *arg_bl9 = arg_rem("","");
+@@ -181,6 +519,7 @@
+ 		      arg_eqmult,arg_eq,arg_overstep,arg_mroverstep,
+ 		      arg_maxstep,arg_minstep,arg_snapinterval,arg_trynewton,
+ 		      arg_sono, arg_spin, arg_rcond, arg_sfr, arg_symmetry,
++		      arg_symaxis, arg_symref,
+ 
+ 		      arg_bl8,arg_dispopts,arg_bl9,
+ 		      arg_display,
+@@ -837,67 +1176,152 @@
+ 
+   if (arg_symmetry->count > 0) {
+ 
+-    /* The first thing we have to do is try to scanf the string and recognize it. */
++    /* Axis and reference direction. The axis is the rotation axis for Z/pZ,
++       Cpv and RDp, and the mirror normal for Cs/D2. The reference direction
++       fixes where the first mirror plane (Cpv) or first 2-fold axis (RDp)
++       sits; nothing else uses it. Both default to what ridgerunner used to
++       hardcode, so existing command lines are unaffected. */
+ 
+-    int p;
+-    if (sscanf(arg_symmetry->sval[0],"Z/%dZ",&p) == 1) {
++    plc_vector symaxis = {{0,0,1}};
++    plc_vector symref  = {{1,0,0}};
++    int p;
+ 
+-      plc_vector zaxis = {{0,0,1}};
+-      /* We recognize the symmetry as rotational. */
++    if (arg_symaxis->count > 0 && !rr_parse_vector(arg_symaxis->sval[0],&symaxis)) {
+ 
+-      logprintf("Recognized symmetry as rotational (Z/%dZ) around z-axis.\n",p);
+-      link->G = plc_rotation_group(link,zaxis,p);
+-      
+-      if (link->G == NULL) {
+-
+-	char errmsg[1024];
+-	sprintf(errmsg,"Couldn't build Z/%dZ symmetry on input link. Aborting run.\n",p);
+-	FatalError(errmsg, __FILE__, __LINE__);
+-
+-      }
++      char errmsg[1024];
++      snprintf(errmsg,sizeof(errmsg),"Couldn't parse --SymmetryAxis=%.256s. Expected three comma-separated numbers, e.g. 0,0,1. Aborting run.\n",
++	      arg_symaxis->sval[0]);
++      FatalError(errmsg, __FILE__, __LINE__);
+ 
+-      plc_symmetrize(link);
+-      logprintf("Built Z/%dZ symmetry on link and symmetrized to initial error %g.\n",p,plc_symmetry_group_check(link));
+-      
+-    } else if (strcmp(arg_symmetry->sval[0],"D2") == 0) {
++    }
++    symaxis = plc_normalize_vect(symaxis,NULL);
+ 
+-      plc_vector zaxis = {{0,0,1}};
+-      logprintf("Recognized symmetry as reflection (D2) over z-axis.\n");
+-      link->G = plc_reflection_group(link,zaxis);
++    if (arg_symref->count > 0 && !rr_parse_vector(arg_symref->sval[0],&symref)) {
+ 
+-      if (link->G == NULL) {
++      char errmsg[1024];
++      snprintf(errmsg,sizeof(errmsg),"Couldn't parse --SymmetryRef=%.256s. Expected three comma-separated numbers, e.g. 1,0,0. Aborting run.\n",
++	      arg_symref->sval[0]);
++      FatalError(errmsg, __FILE__, __LINE__);
+ 
+-	char errmsg[1024];
+-	sprintf(errmsg,"Couldn't build D2 reflection symmetry on input link. Aborting run.\n");
+-	FatalError(errmsg, __FILE__, __LINE__);
++    }
++    symref = rr_perp_to(symref,symaxis);
++
++    /* Report only what the chosen group consumes. Ci ignores both, and
++       everything but Cpv/RDp ignores the reference direction; logging them
++       regardless reads as though they were in force. */
++    if (strcmp(arg_symmetry->sval[0],"Ci") == 0 ||
++	strcmp(arg_symmetry->sval[0],"cplanes") == 0) {
+ 
+-      }
++      logprintf("This group takes no axis or reference direction.\n");
+ 
+-      plc_symmetrize(link);
+-      logprintf("Built D2 reflection symmetry on link and symmetrized to initial error %g.\n",p,plc_symmetry_group_check(link));
+-    
+-    } else if (strcmp(arg_symmetry->sval[0],"cplanes") == 0) {
++    } else if (rr_match_order(arg_symmetry->sval[0],"C%dv%n",&p) ||
++	       rr_match_order(arg_symmetry->sval[0],"RD%d%n",&p)) {
+ 
+-      logprintf("Recognized symmetry as reflections over coordinate planes (cplanes).\n");
+-      link->G = plc_coordplanes_reflection_group(link);
++      logprintf("Symmetry axis (%g,%g,%g), reference direction (%g,%g,%g).\n",
++		symaxis.c[0],symaxis.c[1],symaxis.c[2],
++		symref.c[0],symref.c[1],symref.c[2]);
+ 
+-      if (link->G == NULL) {
++    } else {
+ 
+-	char errmsg[1024];
+-	sprintf(errmsg,"Couldn't build cplanes reflection symmetry on input link. Aborting run.\n");
+-	FatalError(errmsg, __FILE__, __LINE__);
++      logprintf("Symmetry axis (%g,%g,%g).\n",symaxis.c[0],symaxis.c[1],symaxis.c[2]);
+ 
++    }
++
++    /* Every pattern is matched with rr_match_order, which requires the whole
++       argument to be consumed. Anything less lets a prefix select a branch:
++       "C3" would take the Cpv branch and silently build C3v, and "Z/2,D2"
++       would build Z/2Z with ",D2" quietly dropped. Cpv is tried before Cp so
++       the spellings stay distinct, though full consumption already separates
++       them. */
++
++    if (rr_match_order(arg_symmetry->sval[0],"Z/%dZ%n",&p)) {
++
++      if (p < 1) { rr_symmetry_bad_order(arg_symmetry->sval[0],p,1); }
++      rr_check_order_fits(arg_symmetry->sval[0],p,link);
++
++      logprintf("Recognized symmetry as rotational Z/%dZ (C%d) about the symmetry axis.\n",p,p);
++      link->G = plc_rotation_group(link,symaxis,p);
++      if (!rr_group_complete(link->G)) { rr_symmetry_build_failed("Z/pZ"); }
++      rr_symmetrize_and_report(link,"Z/pZ");
++
++    } else if (rr_match_order(arg_symmetry->sval[0],"C%dv%n",&p)) {
++
++      if (p < 2) { rr_symmetry_bad_order(arg_symmetry->sval[0],p,2); }
++      rr_check_order_fits(arg_symmetry->sval[0],p,link);
++
++      logprintf("Recognized symmetry as C%dv: %d-fold rotation plus %d mirrors through the axis.\n",p,p,p);
++      link->G = rr_cnv_group(link,symaxis,symref,p);
++      if (!rr_group_complete(link->G)) { rr_symmetry_build_failed("Cnv"); }
++      rr_symmetrize_and_report(link,"Cnv");
++
++    } else if (rr_match_order(arg_symmetry->sval[0],"C%d%n",&p)) {
++
++      /* Cp is the plain p-fold rotation group, i.e. exactly Z/pZ. Spelling it
++	 the Schoenflies way must not quietly get you Cpv: the two differ by p
++	 mirror planes, and mirrors are orientation reversing, so the run would
++	 be constrained to a different problem than the one asked for. The Cpv
++	 branch is tried first and both require full-string consumption, so
++	 "C3v" cannot reach here and "C3" cannot reach there. */
++      if (p < 1) { rr_symmetry_bad_order(arg_symmetry->sval[0],p,1); }
++      rr_check_order_fits(arg_symmetry->sval[0],p,link);
++
++      logprintf("Recognized symmetry as C%d, the %d-fold rotation group (same as Z/%dZ).\n",p,p,p);
++      link->G = plc_rotation_group(link,symaxis,p);
++      if (!rr_group_complete(link->G)) { rr_symmetry_build_failed("Cp"); }
++      rr_symmetrize_and_report(link,"Cp");
++
++    } else if (rr_match_order(arg_symmetry->sval[0],"RD%d%n",&p)) {
++
++      if (p < 2) { rr_symmetry_bad_order(arg_symmetry->sval[0],p,2); }
++      rr_check_order_fits(arg_symmetry->sval[0],p,link);
++
++      logprintf("Recognized symmetry as RD%d: real dihedral, a %d-fold axis plus %d perpendicular 2-fold axes.\n",p,p,p);
++      link->G = rr_dihedral_group(link,symaxis,symref,p);
++      if (!rr_group_complete(link->G)) { rr_symmetry_build_failed("RDn"); }
++      rr_symmetrize_and_report(link,"RDn");
++
++    } else if (strcmp(arg_symmetry->sval[0],"Ci") == 0) {
++
++      logprintf("Recognized symmetry as Ci: inversion.\n");
++      logprintf("  The centre is the origin, not the centroid, so centre the input first.\n");
++      logprintf("  Inversion reverses orientation, so only an amphichiral link can have it.\n");
++      link->G = rr_inversion_group(link);
++      if (!rr_group_complete(link->G)) { rr_symmetry_build_failed("Ci"); }
++      rr_symmetrize_and_report(link,"Ci");
++
++    } else if (strcmp(arg_symmetry->sval[0],"Cs") == 0 ||
++	       strcmp(arg_symmetry->sval[0],"D2") == 0) {
++
++      if (strcmp(arg_symmetry->sval[0],"D2") == 0) {
++
++	logprintf("Note: --Symmetry=D2 builds a SINGLE mirror, which is Cs of order 2, not the\n");
++	logprintf("      D2 of molecular symmetry. Use Cs for clarity, or RD2 for the real D2.\n");
++
+       }
+ 
+-      plc_symmetrize(link);
+-      logprintf("Built cplanes reflection symmetry on link and symmetrized to initial error %g.\n",
+-		p,plc_symmetry_group_check(link));
++      logprintf("Recognized symmetry as Cs: one mirror, in the plane normal to the symmetry axis.\n");
++      link->G = plc_reflection_group(link,symaxis);
++      if (!rr_group_complete(link->G)) { rr_symmetry_build_failed("Cs"); }
++      rr_symmetrize_and_report(link,"Cs");
+ 
++    } else if (strcmp(arg_symmetry->sval[0],"cplanes") == 0) {
++
++      logprintf("Recognized symmetry as reflections over coordinate planes (cplanes).\n");
++      logprintf("  Note: this element set is not closed. The product of two of its mirrors is\n");
++      logprintf("  a half turn that is not in the set, so averaging over it is not a\n");
++      logprintf("  projection. RD2 or C2v is usually what was wanted.\n");
++      link->G = plc_coordplanes_reflection_group(link);
++      if (!rr_group_complete(link->G)) { rr_symmetry_build_failed("cplanes"); }
++      rr_symmetrize_and_report(link,"cplanes");
++
+     } else {
+ 
+-      	char errmsg[1024];
+-	sprintf(errmsg,"Couldn't parse symmetry group %s. Aborting run.\n",arg_symmetry->sval[0]);
+-	FatalError(errmsg, __FILE__, __LINE__);
++      char errmsg[1024];
++      snprintf(errmsg,sizeof(errmsg),"Couldn't parse symmetry group %.256s. Aborting run.\n"
++	       "  Accepted: Z/pZ, Cp (same thing), Ci, Cs, Cpv (e.g. C2v, C3v),\n"
++	       "  RDp (e.g. RD2, RD3), cplanes, and D2 (deprecated alias for Cs).\n",
++	       arg_symmetry->sval[0]);
++      FatalError(errmsg, __FILE__, __LINE__);
+ 
+     }
+ 
+--- a/src/stepper.c
++++ b/src/stepper.c
+@@ -373,6 +373,11 @@
+ 
+     if ( inState->steps%inState->loginterval == 0 ) {
+ 
++      /* The symmetry error has to be read off the link, which
++	 update_runtime_logs does not get, so stash it here the way the other
++	 per-step diagnostics are stashed. Returns 0 immediately when no group
++	 is set, so an unsymmetrized run pays nothing. */
++      inState->symmetryError = plc_symmetry_group_check(*inLink);
+       update_runtime_logs(inState);
+ 
+     }
+@@ -448,6 +453,7 @@
+ 
+   if ( inState->steps%inState->loginterval != 0 ) {
+ 
++    inState->symmetryError = plc_symmetry_group_check(*inLink);
+     update_runtime_logs(inState);
+     
+   }
+@@ -671,6 +677,7 @@
+   fprintf(state->logfiles[kEffectiveness],"%d %g %g\n",state->steps,
+ 	  state->lastStepPocaEffectiveness,state->lastStepMREffectiveness);
+   fprintf(state->logfiles[kScore],"%d %g\n",state->steps,state->score);
++  fprintf(state->logfiles[kSymmetryError],"%d %g \n",state->steps,state->symmetryError);
+ 
+ #ifdef HAVE_MALLINFO
+   struct mallinfo m;
+--- a/src/ridgerunner.h
++++ b/src/ridgerunner.h
+@@ -262,6 +262,7 @@
+   double  avgDvdtMag;   // avg of all dvdt norms
+   double  residual;	// residual of last snnls call
+   double  strutfreeresidual; // portion of residual on strut-free sections of the curve
++  double  symmetryError; // max vertex error over the symmetry group, 0 when none is set
+   
+   double  oldLength;
+   double  oldLengthTime;

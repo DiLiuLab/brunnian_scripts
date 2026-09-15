@@ -2,3 +2,10 @@ __pycache__/
 *.pyc
 .DS_Store
 previous/
+
+# tsnnls writes these into the working directory on some runs
+A.dat
+A.mat
+A.sparse
+b.dat
+b.mat
