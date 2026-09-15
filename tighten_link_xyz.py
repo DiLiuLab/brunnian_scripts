@@ -473,13 +473,33 @@ def run_ridgerunner(
         )
         watcher.start()
 
+    # Tee ridgerunner's stdout to a file in the run directory. It was
+    # previously kept only in `captured`, which is surfaced on FAILURE and
+    # parsed for ropelength, but never written anywhere on a successful quiet
+    # run -- so every diagnostic it prints was silently lost. That is not
+    # cosmetic: the --Symmetry warnings ("turning off EqOn", and the eq FORCE
+    # it turns ON in exchange), the "Built <group> ... Error before
+    # symmetrizing X, after Y" line, and the half-edge-threshold WARNING all go
+    # to stdout, not into ridgerunner's own .rr log. Losing them is why a run
+    # could silently use a different stepper and a different eq regime than the
+    # command line implied, and nobody noticed for five runs.
+    stdout_log = None
+    try:
+        stdout_log = (Path(work_dir) / "ridgerunner_stdout.log").open("w")
+    except Exception:
+        stdout_log = None
     assert process.stdout is not None
     for line in process.stdout:
         captured.append(line.rstrip("\n"))
+        if stdout_log is not None:
+            stdout_log.write(line)
+            stdout_log.flush()
         if on_line is not None:
             on_line(line.rstrip("\n"))
         elif not quiet:
             sys.stderr.write(line)
+    if stdout_log is not None:
+        stdout_log.close()
     returncode = process.wait()
     stop.set()
     if watcher is not None:
