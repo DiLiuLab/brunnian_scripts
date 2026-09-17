@@ -50,6 +50,10 @@ from pathlib import Path
 
 import numpy as np
 
+# tighten_link_xyz lives in the repository root, one level up from this
+# package. Resolved from __file__ so it works wherever the repo is checked
+# out -- these scripts previously carried an absolute path to one machine.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tighten_link_xyz import read_xyz, write_xyz, write_vect
 
 
