@@ -125,6 +125,56 @@ least 3 components.
   - this directory is listed in `.gitignore`, so it is a local archive rather
     than part of the repository; a fresh clone will not contain it
 
+## Tightening Toward Ideal Form
+
+Screening asks whether a diagram is Brunnian. This asks how short its rope can
+be: ropelength = length / thickness, minimised with
+[RidgeRunner](http://www.jasoncantarella.com/) and measured with `octrope`.
+
+- `tighten_link_xyz.py`
+  - the driver: `.xyz` to VECT conversion, runs RidgeRunner, dominance-based
+    configuration selection, a degeneracy watcher, and a Tkinter GUI
+  - `--symmetry`, `--symmetry-axis` and `--symmetry-ref` enforce a point group;
+    the axis and reference options require a patched binary, see below
+  - tees RidgeRunner's stdout into the run directory, where its `--Symmetry`
+    warnings and symmetrisation error live — they do not appear in the `.rr` log
+- `verify_topology.py`
+  - HOMFLYPT comparison via plCurve's `knottype`, reporting an uncomputable
+    polynomial as UNKNOWN rather than as a changed link
+  - necessary and not sufficient: distinct links can share a polynomial, and
+    every pairwise linking number of a Brunnian link is zero, so that check is
+    vacuous here
+- `symmetrize_link_xyz.py`
+  - projects a link onto Cs, Ci, Cn or Cnv and writes a canonical frame —
+    rotation axis on z, first mirror normal on x — matching the patched
+    binary's `--SymmetryAxis` and `--SymmetryRef` defaults, so its output feeds
+    RidgeRunner with no flags
+- `sono_link_xyz.py`
+  - independent SONO relaxer, allocation-grid sweeps, and adaptive coarsening
+    with an in-run HOMFLY guard
+- `tighten_lib/`
+  - the geometric moves, symmetry tooling, resolution changes and diagnostics,
+    each documented in `tighten_lib/README.md`
+  - `compress_gap.py` is the axial gap squeeze — a monotone map, hence a
+    homeomorphism, hence the only move here that *provably* cannot change the
+    link. `contract_clusters.py` generalises it to N clusters and is **not**
+    monotone, so every round needs its own HOMFLY check
+  - `refine_xyz.py --fix-minrad` is what makes refinement viable: MinRad scales
+    with edge length, so plain subdivision divides it by the refinement factor
+    and inflates ropelength
+  - `strut_free.py` decides whether `--Timewarp` is worth its cost;
+    `extract_best.py` recovers both the lowest-ropelength and the most nearly
+    critical snapshot, which diverge
+- `ridgerunner_patches/`
+  - a diff against RidgeRunner 2.3.1 adding `Ci`, `Cs`, `Cpv` and `RDp` plus an
+    explicit symmetry axis and reference direction, a build script that installs
+    beside the stock binary rather than over it, and the caveats
+  - note that RidgeRunner's own `--Symmetry=D2` builds a **single mirror** —
+    `Cs`, order 2 — and not the D2 of molecular symmetry; `RD2` is the real one
+  - `--Symmetry` forces `--AnimationStepper` and changes the equilateralisation
+    regime, so a constrained arm cannot be compared against an ordinary one
+    without a control that passes `--AnimationStepper` too
+
 ## Examples
 
 See `Examples/README.md` for runnable examples and input files.
