@@ -152,13 +152,30 @@ be: ropelength = length / thickness, minimised with
 - `sono_link_xyz.py`
   - independent SONO relaxer, allocation-grid sweeps, and adaptive coarsening
     with an in-run HOMFLY guard
+- `tighten_cycle.py`
+  - the **cycle driver**: automates contract/squeeze-then-recondition rounds, so
+    a link can be taken from a raw layout to a tightened result unattended
+  - `--choose-move` measures every geometric budget each round and picks between
+    the hole squeeze and cluster contraction; `--find-axis` extends that to
+    structures with no symmetry. `--auto-flags` sets RidgeRunner's own options
+    from the measurements, `--auto-steps` stops each descent when reconditioning
+    plateaus, `--vu-ladder` climbs the resolution ladder
+  - HOMFLY-gates every round that needs it, symmetrises only when the measured
+    deviation says it is safe, and writes `BEST.xyz` plus a per-round `ledger.csv`
+  - the descents are **reconditioning**, not polish: one bought +0.01 ropelength
+    while restoring minRad/τ from 1.072 to 1.341 and the contact set from 785
+    struts to 1260, and the next geometric move was only feasible because of it
 - `tighten_lib/`
   - the geometric moves, symmetry tooling, resolution changes and diagnostics,
     each documented in `tighten_lib/README.md`
-  - `compress_gap.py` is the axial gap squeeze — a monotone map, hence a
-    homeomorphism, hence the only move here that *provably* cannot change the
-    link. `contract_clusters.py` generalises it to N clusters and is **not**
-    monotone, so every round needs its own HOMFLY check
+  - `compress_gap.py` is the axial gap squeeze and `radial_squeeze.py` the
+    radial one — both monotone maps, hence homeomorphisms, hence the moves that
+    *provably* cannot change the link. `contract_clusters.py` generalises to N
+    clusters and is **not** monotone, so every round needs its own HOMFLY check
+  - which move to use is a measurement, not a preference: the squeeze closes the
+    void *enclosed* by a ring, the contraction the space *between* clusters.
+    Screen both with the clearance bound — best-case `Rop = length/(minStrut/2)`
+    ignoring minRad — and skip any move whose best case is already a loss
   - `refine_xyz.py --fix-minrad` is what makes refinement viable: MinRad scales
     with edge length, so plain subdivision divides it by the refinement factor
     and inflates ropelength

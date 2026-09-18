@@ -187,8 +187,7 @@ def target_positions(centres, targets):
     return p - p.mean(0) + c0.mean(0)
 
 
-def contract(comps, bands, assign, centres, factor, targets=None,
-             max_gradient=0.5):
+def contract(comps, bands, assign, centres, factor, targets=None):
     """Rigid cluster translations, linearly interpolated along arclength.
 
     With `targets`, the clusters are moved to match those pairwise distances
@@ -235,52 +234,17 @@ def contract(comps, bands, assign, centres, factor, targets=None,
             if len(runs) > 1 and free[0] == 0 and free[-1] == n - 1:
                 runs[0] = runs[-1] + runs[0]
                 runs.pop()
-            # A free run can be asked to move sideways further than it is long.
-            # Measured on a 5-component link at factor 0.90: ten of twenty runs
-            # were 3 vertices (arclength 0.30 D) joining clusters whose
-            # translations differed by 0.32-0.42 D, so the required displacement
-            # GRADIENT exceeded 1 and the strand had to double back on itself.
-            # That produced Z-shaped folds with turning angles up to 162 deg,
-            # drove minRad from 0.533 to 0.0017 and ropelength from 215 to
-            # 63557 -- while leaving the link type intact, so no topology check
-            # catches it.
-            #
-            # The cure is to stop insisting the bands are perfectly rigid. Widen
-            # the ramp into the adjacent bands until the gradient is acceptable,
-            # and use a smoothstep profile so the displacement derivative
-            # vanishes at both ends instead of stepping. Only the vertices
-            # inside the widened window move relative to their cluster; the rest
-            # of each band still translates rigidly, which is what keeps the
-            # intra-cluster contacts (and so the clearance) intact.
-            assigned = ~np.isnan(u[:, 0])
-            base = u.copy()
             for run in runs:
-                before = base[(run[0] - 1) % n]
-                after = base[(run[-1] + 1) % n]
-                need = float(np.linalg.norm(after - before)) / max(max_gradient, 1e-9)
-                window = list(run)
-                have = sum(seg[v % n] for v in run)
-                # grow symmetrically into the neighbouring bands, one vertex at
-                # a time, never crossing into another free run
-                lo, hi = run[0], run[-1]
-                while have < need:
-                    grew = False
-                    nlo = (lo - 1) % n
-                    if assigned[nlo] and np.allclose(base[nlo], before):
-                        window.insert(0, nlo); have += seg[nlo]; lo = nlo; grew = True
-                    nhi = (hi + 1) % n
-                    if assigned[nhi] and np.allclose(base[nhi], after):
-                        window.append(nhi); have += seg[hi % n]; hi = nhi; grew = True
-                    if not grew:
-                        break
-                d = np.empty(len(window) + 1)
+                before = u[(run[0] - 1) % n]
+                after = u[(run[-1] + 1) % n]
+                # arclength along the run, handling the cyclic wrap
+                d = np.empty(len(run) + 1)
                 d[0] = 0.0
-                for m in range(len(window)):
-                    d[m + 1] = d[m] + seg[window[m] % n]
+                for m in range(len(run)):
+                    d[m + 1] = d[m] + seg[(run[m]) % n]
                 span = d[-1] if d[-1] > 0 else 1.0
-                for m, v in enumerate(window):
-                    x = np.clip(d[m] / span, 0.0, 1.0)
-                    w = x * x * (3 - 2 * x)          # smoothstep: C1 at both ends
+                for m, v in enumerate(run):
+                    w = d[m] / span
                     u[v] = (1 - w) * before + w * after
         out.append(c + u)
     return out
@@ -293,13 +257,6 @@ def main() -> int:
     ap.add_argument("output", type=Path, nargs="?")
     ap.add_argument("--factor", type=float)
     ap.add_argument("--scan", action="store_true")
-    ap.add_argument("--max-gradient", type=float, default=0.5,
-                    help="largest displacement gradient allowed along a joining "
-                         "strand. A free run shorter than |delta t|/max_gradient "
-                         "has its ramp widened into the adjacent bands rather "
-                         "than folding. 1.0 is the hard geometric limit (the "
-                         "strand goes straight); 0.5 leaves margin. Set very "
-                         "large to reproduce the old unguarded behaviour.")
     ap.add_argument("--join", type=float, default=3.5,
                     help="Contact bands closer than this (in D) are one cluster.")
     args = ap.parse_args()
@@ -332,8 +289,7 @@ def main() -> int:
     if args.scan:
         print(f"  {'factor':>7}{'length':>9}{'vs now':>9}{'clear':>8}{'minrad':>8}   verdict")
     for f in factors:
-        moved = contract(comps, bands, assign, centres, float(f),
-                         max_gradient=args.max_gradient)
+        moved = contract(comps, bands, assign, centres, float(f))
         L = sum(float(np.linalg.norm(np.roll(c, -1, 0) - c, axis=1).sum()) for c in moved)
         cl, mr = clearance(moved), minrad(moved)
         ok = mr >= mr0 * 0.95 and cl >= diameter * 0.95
@@ -348,8 +304,7 @@ def main() -> int:
             print("error: no usable factor", file=sys.stderr)
             return 1
         write_xyz(args.output, [c.tolist() for c in
-                                contract(comps, bands, assign, centres, float(f),
-                                         max_gradient=args.max_gradient)], 9)
+                                contract(comps, bands, assign, centres, float(f))], 9)
         print(f"\nwrote {args.output} at factor {f:.2f}")
     elif best:
         print(f"\n  best usable: factor {best[1]:.2f}, length {best[0]:.2f} "
