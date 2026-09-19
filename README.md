@@ -184,6 +184,14 @@ be: ropelength = length / thickness, minimised with
     stopped a converged 5-component run at step 10 000 and lost 0.34 units. The
     stop now needs ropelength flat as well — `--rop-eps`, default 1e-4 per block,
     against ~4e-4 for a descent still working and under 1e-5 for a converged one
+  - `--plateau-on` chooses which of the three signals gate the stop; the default
+    `auto` keys on the round's own move. A squeeze at `f <= --plateau-hard-f`
+    (0.5; smaller f is *more* aggressive) is a repair round whose output feeds
+    another move, so it gates on minRad and struts only rather than polishing a
+    configuration about to be broken again. Gentler squeezes, contractions and
+    initial descents gate on all three. Truncation **propagates** — 7BL round 1
+    stopping early meant round 2 began from a less converged input — so run any
+    round you will report with the full gate
 - `tighten_lib/`
   - the geometric moves, symmetry tooling, resolution changes and diagnostics,
     each documented in `tighten_lib/README.md`

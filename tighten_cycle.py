@@ -466,10 +466,53 @@ def _ridgerunner_pid(vect_stem: str) -> int | None:
     return pids[-1] if pids else None
 
 
+ALL_PLATEAU = frozenset({"minrad", "struts", "ropelength"})
+
+
+def resolve_plateau_on(setting, move: str | None, factor: float | None,
+                       hard_f: float) -> tuple[frozenset[str], str]:
+    """Decide which signals gate this round's stop.
+
+    An explicit --plateau-on wins. Otherwise "auto" keys on how badly the round's
+    move broke the configuration, because that decides what the descent is FOR.
+
+    A hard squeeze (small f -- f is the slope of the radial map, so SMALLER is
+    more aggressive) collapses the thickness and hands the descent a large
+    repair job whose output feeds another move. There, minRad and the strut
+    count are the signals that matter: they say the structure is fit to be
+    squeezed again. Waiting for ropelength to converge as well spends thousands
+    of steps polishing a configuration that is about to be deliberately broken.
+
+    A gentle squeeze barely perturbs anything, so the round is mostly a descent
+    and its ropelength IS the product. Contraction likewise preserves tau, and
+    an initial descent has no move at all. Those all get the full gate.
+
+    The caveat, measured and worth stating: truncation PROPAGATES. The
+    7-component link's round 1 stopped early at ropelength 276.080, so round 2
+    began from a less converged input than it needed to, and a later
+    continuation with no move at all recovered 0.84 units from that same file.
+    Cheap intermediate rounds are a deliberate trade of result quality for
+    throughput, not a free saving -- run the final round, or any round you will
+    report, with the full gate.
+    """
+    if setting != "auto":
+        return setting, "as given"
+    if move == "squeeze" and factor is not None and factor <= hard_f:
+        return (ALL_PLATEAU - {"ropelength"},
+                f"auto: squeeze f={factor:.2f} <= {hard_f} is a repair round, "
+                f"ropelength not gated")
+    if move == "squeeze" and factor is not None:
+        return ALL_PLATEAU, (f"auto: squeeze f={factor:.2f} > {hard_f} barely "
+                             f"perturbs, so ropelength is the product")
+    return ALL_PLATEAU, f"auto: {move or 'no move'} preserves tau"
+
+
 def descend_auto(src: Path, dst: Path, work_dir: Path, symmetry: str | None,
                  extra: list[str], snapshot: int, stop_res: float,
                  block: int, patience: int, min_steps: int, max_steps: int,
                  minrad_eps: float, strut_eps: float, rop_eps: float = 1e-4,
+                 plateau_on: frozenset[str] = frozenset(
+                     {"minrad", "struts", "ropelength"}),
                  poll: float = 20.0,
                  wrapper: list[str] | None = None) -> tuple[Path, str]:
     """Run one descent and stop when reconditioning AND ropelength have plateaued.
@@ -500,9 +543,19 @@ def descend_auto(src: Path, dst: Path, work_dir: Path, symmetry: str | None,
     a genuinely converged one moves under 1e-5. The 1e-4 default sits between
     those with an order of magnitude either side.
 
+    Which signals GATE the stop is selectable, because the right answer depends
+    on what the round is for. A round whose job is to make the next geometric
+    move feasible only needs the thickness repaired -- minRad and struts -- and
+    waiting for ropelength to converge as well spends thousands of steps
+    polishing a configuration that is about to be deliberately broken again. A
+    final round, or one being measured as a result, needs all three. All three
+    are always measured and printed; `plateau_on` chooses which must be flat.
+
     The run is launched once and killed in place, rather than chained in blocks:
     restarting would re-autoscale and rebuild the contact set every block.
     """
+    if not plateau_on:
+        raise CycleError("--plateau-on needs at least one signal")
     import signal
     import time
 
@@ -554,8 +607,9 @@ def descend_auto(src: Path, dst: Path, work_dir: Path, symmetry: str | None,
                 print(f"      step {k:6d}  minRad {mr[k]:.4f} (best {best_mr:.4f}, "
                       f"stale {stale_mr})  struts {st[k]:5.0f} (best {best_st:.0f}, "
                       f"stale {stale_st}){rop_note}")
-                if (k >= min_steps and stale_mr >= patience
-                        and stale_st >= patience and stale_rop >= patience):
+                gates = {"minrad": stale_mr, "struts": stale_st,
+                         "ropelength": stale_rop}
+                if k >= min_steps and all(gates[g] >= patience for g in plateau_on):
                     pid = _ridgerunner_pid(Path(src).stem)
                     if pid is None:
                         reason = (f"plateau at step {k} but the ridgerunner process "
@@ -563,9 +617,10 @@ def descend_auto(src: Path, dst: Path, work_dir: Path, symmetry: str | None,
                         print(f"      {reason}")
                         seen.update(range(k, max_steps + block, block))
                         break
-                    print(f"      plateau: minRad, struts AND ropelength all flat "
-                          f"for {patience} blocks; stopping at step {k}")
-                    reason = f"reconditioning and ropelength plateau at step {k}"
+                    names = ", ".join(sorted(plateau_on))
+                    print(f"      plateau: {names} flat for {patience} blocks; "
+                          f"stopping at step {k}")
+                    reason = f"plateau ({names}) at step {k}"
                     import os
                     os.kill(pid, signal.SIGTERM)
                     break
@@ -1445,14 +1500,18 @@ def run_cycle(args) -> int:
             extras = auto_extras + args.rr_arg
             print(f"  flags: {why}")
         if args.auto_steps:
+            gate, gate_why = resolve_plateau_on(
+                args.plateau_on, rd.move, rd.factor, args.plateau_hard_f)
             print(f"  reconditioning: auto (cap {args.max_steps}, block "
                   f"{args.step_block}, patience {args.patience})"
                   + (f", --symmetry {args.symmetry}" if args.symmetry else ""))
+            print(f"  plateau gate: {', '.join(sorted(gate))}  [{gate_why}]")
             _, why = descend_auto(
                 contracted, descended, run_dir, args.symmetry, extras,
                 args.snapshot_interval, args.stop_res, args.step_block,
                 args.patience, args.min_steps, args.max_steps,
-                args.minrad_eps, args.strut_eps, args.rop_eps, wrapper=wrap)
+                args.minrad_eps, args.strut_eps, args.rop_eps,
+                gate, wrapper=wrap)
             rd.note = why
             print(f"  stopped: {why}")
         else:
@@ -1581,6 +1640,21 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--minrad-eps", type=float, default=0.01,
                    help="relative improvement in the minRad median that counts as "
                         "progress (default 0.01)")
+    a.add_argument("--plateau-on", default="auto",
+                   help="which signals must be flat before --auto-steps stops a "
+                        "descent: 'auto' (default), or a comma-separated subset "
+                        "of minrad, struts, ropelength. All three are always "
+                        "measured and printed; this chooses which ones gate. "
+                        "'auto' keys on the round's own move: a squeeze at "
+                        "f <= --plateau-hard-f is a repair round whose output "
+                        "feeds another move, so it gates on minrad and struts "
+                        "only; a gentler squeeze, a contraction and an initial "
+                        "descent all gate on all three. Truncation propagates, "
+                        "so run any round you will REPORT with all three.")
+    a.add_argument("--plateau-hard-f", type=float, default=0.5,
+                   help="squeeze factors at or below this count as repair rounds "
+                        "for --plateau-on auto (default 0.5). f is the slope of "
+                        "the radial map, so SMALLER f is more aggressive.")
     a.add_argument("--rop-eps", type=float, default=1e-4,
                    help="relative ropelength improvement per block that still "
                         "counts as progress (default 1e-4). A descent that is "
@@ -1748,6 +1822,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.vu_ladder and not LIB.joinpath("refine_xyz.py").is_file():
         print(f"error: --vu-ladder needs {LIB}/refine_xyz.py", file=sys.stderr)
         return 2
+    if args.plateau_on.strip().lower() != "auto":
+        valid = {"minrad", "struts", "ropelength"}
+        args.plateau_on = frozenset(v.strip().lower()
+                                    for v in args.plateau_on.split(",") if v.strip())
+        if not args.plateau_on or not args.plateau_on <= valid:
+            print(f"error: --plateau-on must be 'auto' or a comma-separated "
+                  f"subset of {sorted(valid)}", file=sys.stderr)
+            return 2
+    else:
+        args.plateau_on = "auto"
     if args.sym_group and not args.sym_order:
         print("error: --sym-group needs --sym-order", file=sys.stderr)
         return 2
