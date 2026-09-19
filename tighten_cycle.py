@@ -1595,6 +1595,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--work-dir", required=True,
                    help="scratch tree. Keep it OUT of Dropbox: RidgeRunner rewrites a "
                         "multi-megabyte constraint matrix continuously.")
+    p.add_argument("--gui", action="store_true",
+                   help="open a window to fill in these options instead of "
+                        "typing them. Also the default when the script is run "
+                        "with no arguments at all. Needs tkinter, which ships "
+                        "with Python; every field in the window carries a '?' "
+                        "that shows this same help text.")
     p.add_argument("--resume", action="store_true",
                    help="continue an interrupted cycle in --work-dir instead of "
                         "starting a new one. The driver keeps the round index, the "
@@ -1611,8 +1617,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--steps", type=int, default=30000,
                    help="fixed reconditioning steps per round (default 30000). "
                         "Ignored under --auto-steps.")
-    p.add_argument("--stop-res", type=float, default=1e-4)
-    p.add_argument("--snapshot-interval", type=int, default=1000)
+    p.add_argument("--stop-res", type=float, default=1e-4,
+                   help="stop a descent early if RidgeRunner's residual falls "
+                        "below this (default 1e-4, the author's convergence "
+                        "benchmark). Our runs rarely reach it -- typical "
+                        "finished values are 0.2 to 0.4 -- so in practice the "
+                        "step cap or the plateau test ends a descent first.")
+    p.add_argument("--snapshot-interval", type=int, default=1000,
+                   help="write a snapshot every N steps (default 1000). The "
+                        "best configuration is recovered from these, so the "
+                        "interval bounds how much of a mid-run optimum can be "
+                        "missed; extract_best.py reports that penalty rather "
+                        "than hiding it. Smaller costs disk, not compute.")
 
     a = p.add_argument_group(
         "automatic step count",
@@ -1667,8 +1683,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="same for the strut median (default 0.02)")
 
     g = p.add_argument_group("contraction scan")
-    g.add_argument("--factor-lo", type=float, default=0.80)
-    g.add_argument("--factor-hi", type=float, default=0.99)
+    g.add_argument("--factor-lo", type=float, default=0.80,
+                   help="hardest contraction factor to try (default 0.80). For "
+                        "a CONTRACTION the factor is how far clusters move "
+                        "toward their common centre, so a lower number is the "
+                        "more aggressive move.")
+    g.add_argument("--factor-hi", type=float, default=0.99,
+                   help="gentlest contraction factor to try (default 0.99). "
+                        "1.0 would be no contraction at all.")
     g.add_argument("--factor-step", type=float, default=0.01,
                    help="the window narrows as rounds proceed; 0.01 resolves it "
                         "(default 0.01)")
@@ -1686,8 +1708,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="symmetrize_link_xyz.py --group for re-symmetrizing after each "
                         "contraction, e.g. Cn (there is no 'C5'; use Cn with "
                         "--sym-order 5)")
-    s.add_argument("--sym-order", type=int, default=None)
-    s.add_argument("--sym-axis", default="0,0,1")
+    s.add_argument("--sym-order", type=int, default=None,
+                   help="the n in Cn, for our own symmetry tool -- normally the "
+                        "number of loops. It must agree with the n in "
+                        "--symmetry Z/nZ, which is RidgeRunner's own flag.")
+    s.add_argument("--sym-axis", default="0,0,1",
+                   help="rotation axis as x,y,z (default 0,0,1). Files from our "
+                        "drawing scripts already put the axis on z. Note this "
+                        "is also the axis a hole squeeze uses: on a symmetric "
+                        "link the squeeze axis MUST be the symmetry axis.")
     s.add_argument("--no-permute", action="store_true",
                    help="require every element to carry each component onto itself. "
                         "WRONG when the rotation cycles components, which it does for "
@@ -1794,7 +1823,16 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(line_buffering=True)
     except (AttributeError, OSError):
         pass
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    raw = sys.argv[1:] if argv is None else list(argv)
+    # No arguments at all, or --gui: this is a launcher, not a run. The window
+    # assembles a command line and starts it detached, so it never needs the
+    # validation below -- which would reject an empty argv outright.
+    if not raw or "--gui" in raw:
+        from tighten_gui import launch
+        return launch(parser)
+
+    args = parser.parse_args(argv)
     if not args.input and not args.resume:
         print("error: give an input .xyz, or --resume to continue a cycle "
               "already in --work-dir", file=sys.stderr)
@@ -1843,6 +1881,9 @@ def main(argv: list[str] | None = None) -> int:
     if not LIB.joinpath("contract_clusters.py").is_file():
         print(f"error: {LIB}/contract_clusters.py not found", file=sys.stderr)
         return 2
+    if args.gui:                      # reachable only via an explicit call
+        from tighten_gui import launch
+        return launch(parser)
     try:
         return run_cycle(args)
     except CycleError as exc:

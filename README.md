@@ -152,6 +152,21 @@ be: ropelength = length / thickness, minimised with
 - `sono_link_xyz.py`
   - independent SONO relaxer, allocation-grid sweeps, and adaptive coarsening
     with an in-run HOMFLY guard
+- `tighten_gui.py`
+  - a tkinter window for `tighten_cycle.py`, entered by running it with **no
+    arguments** or with `--gui`. Every label, default, type and help string is
+    read out of the argument parser at run time, so nothing is duplicated: add
+    an argument to `build_parser()` and it appears in the window, in its own
+    group, with the right widget
+  - each field carries a light-blue **?** that opens its own help text, its
+    default, and — where one earns its place — a worked example
+  - it is a **launcher, not a host**. A cycle runs for hours, so *Run in
+    background* spawns a detached process logging to `<work-dir>/cycle.log` and
+    hands back the command to watch it; closing the window does not stop the
+    job. *Build command* just shows the command line, which is also the way to
+    learn the CLI
+  - the values are validated by argparse itself before anything is launched, so
+    the window cannot assemble a command the script would reject
 - `tighten_cycle.py`
   - the **cycle driver**: automates contract/squeeze-then-recondition rounds, so
     a link can be taken from a raw layout to a tightened result unattended
