@@ -949,6 +949,65 @@ def scan_squeeze(src: Path, scratch: Path, factors: list[float], blend: float,
     return rows
 
 
+def marginal_sensitivity(src: Path, scratch: Path, probe_f: float, blend: float,
+                         axis=None, point=None) -> float | None:
+    """Thickness destroyed per unit length removed by an INFINITESIMAL squeeze.
+
+    This is the go/no-go for a hole squeeze, and it is a different quantity from
+    the sensitivity at the factor the sweep would pick.
+
+    The physical question is whether the hole is held open by SLACK or by the
+    PACKING of the strands around it. A hole with slack lets the first nudge
+    inward happen almost for free. A hole whose ring of strands is already in
+    mutual contact charges for that nudge immediately, because there is nowhere
+    for the strands to go: every inward step lands on a contact. Measuring at
+    f -> 1 isolates that first nudge, before the map has moved far enough for
+    the two cases to look alike.
+
+    Measured over every squeeze this project has run, against the outcome of the
+    round that followed (probe f=0.99, blend 0.5):
+
+        7BL 289.01 mirrored      0.00    WON -12.93   (the mirror MADE the slack)
+        7BL 343.84 r1 input      1.59    WON -10.17
+        5BL 213.86 r11 input     1.86    WON  -9.96
+        5BL 203.99 r12 input     2.04    WON  -1.44
+        ------------------------------- gap
+        7BL 276.08               2.57    LOST +1.12, and again +1.06
+        7BL 275.01               2.61    judged packed by eye, confirmed: the
+                                         median gap to another strand is 1.001 D
+                                         at every depth, so nothing can move
+        5BL 202.16               2.81    untested; predicts no-go
+
+    The same structures measured at f=0.20 -- which is what the sweep's own
+    sensitivity column shows for the factor it would choose -- give 3.03 for a
+    loser and 2.99 for a winner. No separation at all. The signal exists only in
+    the limit, which is why this probes rather than reading the sweep.
+
+    Six structures with the boundary in a 0.5-wide gap is thin evidence, so
+    --squeeze-max-sens moves the line and the measured value is always printed,
+    whichever side of it the structure falls.
+    """
+    sys.path.insert(0, str(LIB))
+    from radial_squeeze import apply_squeeze, apply_squeeze_about
+    comps = [np.asarray(c, float) for c in read_xyz(src)]
+    m0 = measure(src, want_struts=False)
+    if point is not None:
+        sq = apply_squeeze_about(comps, point, axis, probe_f, blend)
+    else:
+        sq, _, _ = apply_squeeze(comps, [0, 0, 1], probe_f, blend)
+    cand = scratch / f"probe_{probe_f:.3f}.xyz"
+    write_xyz(cand, [c.tolist() for c in sq], 12)
+    try:
+        m = measure(cand, want_struts=False)
+    finally:
+        cand.unlink(missing_ok=True)
+    d_len = (m0.length - m.length) / m0.length if m0.length else 0.0
+    d_tau = (m0.tau - m.tau) / m0.tau if m0.tau else 0.0
+    if d_len <= 1e-9:
+        return None                    # the probe removed nothing measurable
+    return d_tau / d_len
+
+
 def choose_move(current: Path, m_in, args, scratch: Path):
     """Pick this round's geometric move from the measured structure.
 
@@ -1009,6 +1068,23 @@ def choose_move(current: Path, m_in, args, scratch: Path):
                          f"sens {fmt(r.sens, '5.2f')}  "
                          f"minRad/(clear/2) {r.margin:5.2f}  "
                          f"{'admissible' if r.admissible else 'too kinked'}{flag}")
+        marg = marginal_sensitivity(current, scratch, args.squeeze_probe_f,
+                                    args.squeeze_blend, ax, pt)
+        if marg is None:
+            parts.append("marginal sensitivity unmeasurable (the probe removed "
+                         "no length); treating the hole as closed")
+            ok = []
+        else:
+            parts.append(f"marginal sensitivity at f={args.squeeze_probe_f:.2f}: "
+                         f"{marg:.2f}  (refuse above {args.squeeze_max_sens:.2f})")
+            if marg > args.squeeze_max_sens:
+                parts.append(
+                    f"-> NO SQUEEZE: {marg:.2f} > {args.squeeze_max_sens:.2f}. The "
+                    f"first infinitesimal squeeze already costs {marg:.2f} of "
+                    f"thickness per unit of length removed, so this hole is held "
+                    f"open by the PACKING of the strands around it, not by slack. "
+                    f"An open hole is not a budget.")
+                ok = []
         if ok:
             pick = min(ok, key=lambda r: r.factor)   # hardest safe squeeze
             sym_note = ("axis found by search" if args.find_axis
@@ -1017,7 +1093,8 @@ def choose_move(current: Path, m_in, args, scratch: Path):
                          f"{(m_in.length - pick.length) / m_in.length * 100:.1f}% of "
                          f"length, topology guaranteed, {sym_note}")
             return "squeeze", pick, "\n  ".join(parts)
-        parts.append("no admissible squeeze factor despite the open hole")
+        elif marg is not None and marg <= args.squeeze_max_sens:
+            parts.append("no admissible squeeze factor despite the open hole")
     else:
         parts.append("hole closed; squeeze has no budget")
 
@@ -1777,6 +1854,21 @@ def build_parser() -> argparse.ArgumentParser:
                          "considered out of budget (default 0.25)")
     mv.add_argument("--squeeze-blend", type=float, default=0.5,
                     help="smoothstep width of the radial ramp (default 0.5)")
+    mv.add_argument("--squeeze-max-sens", type=float, default=2.30,
+                    help="refuse a hole squeeze when its MARGINAL sensitivity "
+                         "exceeds this (default 2.30). Marginal sensitivity is "
+                         "(dtau/tau)/(dL/L) for an infinitesimal squeeze: the "
+                         "thickness destroyed per unit of length removed by the "
+                         "first nudge inward. It tells a hole held open by SLACK "
+                         "from one held open by the PACKING of the strands "
+                         "around it, which an open hole alone cannot. Every "
+                         "squeeze that won measured <= 2.04; the rounds that "
+                         "lost measured >= 2.57. See marginal_sensitivity().")
+    mv.add_argument("--squeeze-probe-f", type=float, default=0.99,
+                    help="factor for that probe (default 0.99, i.e. almost no "
+                         "squeeze at all). The signal lives in the limit: at "
+                         "f=0.20 a winning and a losing structure read 2.99 and "
+                         "3.03, indistinguishable.")
     mv.add_argument("--squeeze-margin", type=float, default=1.10,
                     help="required minRad/(minStrut/2) after the squeeze; keeps "
                          "curvature comfortably non-binding (default 1.10)")
@@ -1792,7 +1884,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "axis by itself.")
     mv.add_argument("--axis-dirs", type=int, default=160,
                     help="directions swept by --find-axis (default 160)")
-    mv.add_argument("--squeeze-factors", default="0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9",
+    mv.add_argument("--squeeze-factors", default="0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,0.95,0.98",
                     help="factors swept by the squeeze scan; the HARDEST "
                          "admissible one is taken")
 

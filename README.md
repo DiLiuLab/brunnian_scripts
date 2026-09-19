@@ -218,7 +218,16 @@ be: ropelength = length / thickness, minimised with
     void *enclosed* by a ring, the contraction the space *between* clusters.
     Screen both with the clearance bound — best-case `Rop = length/(minStrut/2)`
     ignoring minRad — and skip any move whose best case is already a loss
-  - for a squeeze, read the **sensitivity** column that `scan_squeeze` prints:
+  - the squeeze go/no-go is **marginal sensitivity**: `(Δτ/τ)/(ΔL/L)` for an
+    *infinitesimal* squeeze (probe f=0.99), i.e. the thickness destroyed by the
+    first nudge inward. It separates a hole held open by SLACK from one held
+    open by the PACKING of the strands around it — a distinction an open hole
+    cannot make, and the reason "there is a tunnel" was never a budget. Every
+    squeeze that won measured ≤ 2.04, every one that lost ≥ 2.57, and the gate
+    refuses above `--squeeze-max-sens` (2.30). The same quantity measured at
+    the factor the sweep would pick reads 2.99 for a winner and 3.03 for a
+    loser: the signal exists only in the limit
+  - for a squeeze, also read the **sensitivity** column that `scan_squeeze` prints:
     `sens = (Δτ/τ)/(ΔL/L)`, the thickness destroyed per unit of length removed.
     An open hole is not by itself a budget — the question is whether the hole is
     held open by slack or by the packing of the strands around it, and only
