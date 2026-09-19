@@ -159,7 +159,8 @@ be: ropelength = length / thickness, minimised with
     the hole squeeze and cluster contraction; `--find-axis` extends that to
     structures with no symmetry. `--auto-flags` sets RidgeRunner's own options
     from the measurements, `--auto-steps` stops each descent when reconditioning
-    plateaus, `--vu-ladder` climbs the resolution ladder
+    **and ropelength** have both plateaued, `--vu-ladder` climbs the resolution
+    ladder
   - HOMFLY-gates every round that needs it, symmetrises only when the measured
     deviation says it is safe, and writes `BEST.xyz` plus a per-round `ledger.csv`
   - `--resume` continues a cycle whose driver died. The round index, the running
@@ -175,6 +176,14 @@ be: ropelength = length / thickness, minimised with
   - the descents are **reconditioning**, not polish: one bought +0.01 ropelength
     while restoring minRad/τ from 1.072 to 1.341 and the contact set from 785
     struts to 1260, and the next geometric move was only feasible because of it
+  - but a repaired thickness is **not** a converged ropelength, and `--auto-steps`
+    originally stopped on minRad and struts alone. On the 7-component link that
+    ended a round at step 12 000 with ropelength 276.080; restarting that exact
+    file with *no geometric move at all* recovered 0.84 units in 8 500 steps and
+    was still falling. Replayed against the traces, the old rule would also have
+    stopped a converged 5-component run at step 10 000 and lost 0.34 units. The
+    stop now needs ropelength flat as well — `--rop-eps`, default 1e-4 per block,
+    against ~4e-4 for a descent still working and under 1e-5 for a converged one
 - `tighten_lib/`
   - the geometric moves, symmetry tooling, resolution changes and diagnostics,
     each documented in `tighten_lib/README.md`

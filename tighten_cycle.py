@@ -469,16 +469,36 @@ def _ridgerunner_pid(vect_stem: str) -> int | None:
 def descend_auto(src: Path, dst: Path, work_dir: Path, symmetry: str | None,
                  extra: list[str], snapshot: int, stop_res: float,
                  block: int, patience: int, min_steps: int, max_steps: int,
-                 minrad_eps: float, strut_eps: float, poll: float = 20.0,
+                 minrad_eps: float, strut_eps: float, rop_eps: float = 1e-4,
+                 poll: float = 20.0,
                  wrapper: list[str] | None = None) -> tuple[Path, str]:
-    """Run one descent and stop it when RECONDITIONING has plateaued.
+    """Run one descent and stop when reconditioning AND ropelength have plateaued.
 
-    Calibrated on a measured round: minRad's block median peaked at step 3000
-    and then only oscillated for 12000 more steps, while the strut count peaked
-    at 8000. minRad is the quantity that gates the next contraction's
-    feasibility (contraction preserves clearance and spends minRad), so it is
-    the primary signal, with a guard against stopping while the contact set is
-    still being rebuilt.
+    minRad and the strut count say when the THICKNESS REPAIR is finished, which
+    is what gates the next geometric move's feasibility. They were the original
+    stopping signal, calibrated on a round where minRad's block median peaked at
+    step 3000 and only oscillated for 12000 more while the strut count peaked at
+    8000.
+
+    Keying the stop on those two alone was wrong, and measurably so. A repaired
+    thickness does not mean a converged ropelength: the 7-component link's round
+    stopped at step 12000 with minRad and struts both flat for three blocks, at
+    ropelength 276.080, and restarting that exact file with no geometric move at
+    all -- no squeeze, no mirror, no refinement -- recovered 0.84 units within
+    8500 steps and was still falling at ~0.21 per 2000 with no sign of tapering.
+    The corner margin ROSE over that stretch, 1.023 to 1.164, so the descent was
+    still reconditioning too; the plateau test had simply read the oscillation of
+    an already-high minRad as convergence. Every round of that link stopped the
+    same way, at 7000-16000 steps against a 30000 cap, so the per-round gains
+    were systematically understated and rounds were judged failures on truncated
+    evidence.
+
+    So ropelength must flatten as well. It is tracked the opposite way from the
+    other two -- improvement means going DOWN -- and needs a much tighter
+    threshold, because ropelength changes by far less in relative terms: a run
+    actively descending moves ~4e-4 of its own value per 1000-step block, while
+    a genuinely converged one moves under 1e-5. The 1e-4 default sits between
+    those with an order of magnitude either side.
 
     The run is launched once and killed in place, rather than chained in blocks:
     restarting would re-autoscale and rebuild the contact set every block.
@@ -502,7 +522,8 @@ def descend_auto(src: Path, dst: Path, work_dir: Path, symmetry: str | None,
             stdout=sink, stderr=subprocess.STDOUT, text=True)
 
     best_mr = best_st = -np.inf
-    stale_mr = stale_st = 0
+    best_rop = np.inf                 # ropelength improves DOWNWARD
+    stale_mr = stale_st = stale_rop = 0
     seen: set[int] = set()
     reason = f"reached --max-steps {max_steps}"
     try:
@@ -510,6 +531,7 @@ def descend_auto(src: Path, dst: Path, work_dir: Path, symmetry: str | None,
             time.sleep(poll)
             mr = _block_medians(read_trace(work_dir, "minrad"), block)
             st = _block_medians(read_trace(work_dir, "strutcount"), block)
+            rp = _block_medians(read_trace(work_dir, "ropelength"), block) or {}
             for k in sorted(mr):
                 if k in seen or k not in st:
                     continue
@@ -519,10 +541,21 @@ def descend_auto(src: Path, dst: Path, work_dir: Path, symmetry: str | None,
                 stale_mr = 0 if improved_mr else stale_mr + 1
                 stale_st = 0 if improved_st else stale_st + 1
                 best_mr, best_st = max(best_mr, mr[k]), max(best_st, st[k])
+                if k in rp:
+                    improved_rop = rp[k] < best_rop * (1 - rop_eps)
+                    stale_rop = 0 if improved_rop else stale_rop + 1
+                    best_rop = min(best_rop, rp[k])
+                    rop_note = f"  rop {rp[k]:.4f} (best {best_rop:.4f}, stale {stale_rop})"
+                else:
+                    # no ropelength row for this block: do not let a missing
+                    # trace silently satisfy the new condition
+                    stale_rop = 0
+                    rop_note = "  rop -"
                 print(f"      step {k:6d}  minRad {mr[k]:.4f} (best {best_mr:.4f}, "
                       f"stale {stale_mr})  struts {st[k]:5.0f} (best {best_st:.0f}, "
-                      f"stale {stale_st})")
-                if k >= min_steps and stale_mr >= patience and stale_st >= patience:
+                      f"stale {stale_st}){rop_note}")
+                if (k >= min_steps and stale_mr >= patience
+                        and stale_st >= patience and stale_rop >= patience):
                     pid = _ridgerunner_pid(Path(src).stem)
                     if pid is None:
                         reason = (f"plateau at step {k} but the ridgerunner process "
@@ -530,9 +563,9 @@ def descend_auto(src: Path, dst: Path, work_dir: Path, symmetry: str | None,
                         print(f"      {reason}")
                         seen.update(range(k, max_steps + block, block))
                         break
-                    print(f"      plateau: minRad and struts both flat for "
-                          f"{patience} blocks; stopping at step {k}")
-                    reason = f"reconditioning plateau at step {k}"
+                    print(f"      plateau: minRad, struts AND ropelength all flat "
+                          f"for {patience} blocks; stopping at step {k}")
+                    reason = f"reconditioning and ropelength plateau at step {k}"
                     import os
                     os.kill(pid, signal.SIGTERM)
                     break
@@ -1419,7 +1452,7 @@ def run_cycle(args) -> int:
                 contracted, descended, run_dir, args.symmetry, extras,
                 args.snapshot_interval, args.stop_res, args.step_block,
                 args.patience, args.min_steps, args.max_steps,
-                args.minrad_eps, args.strut_eps, wrapper=wrap)
+                args.minrad_eps, args.strut_eps, args.rop_eps, wrapper=wrap)
             rd.note = why
             print(f"  stopped: {why}")
         else:
@@ -1548,6 +1581,14 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--minrad-eps", type=float, default=0.01,
                    help="relative improvement in the minRad median that counts as "
                         "progress (default 0.01)")
+    a.add_argument("--rop-eps", type=float, default=1e-4,
+                   help="relative ropelength improvement per block that still "
+                        "counts as progress (default 1e-4). A descent that is "
+                        "still working moves ~4e-4 of its own value per 1000 "
+                        "steps; a converged one moves under 1e-5. Stopping on "
+                        "minRad and struts alone left 0.84 ropelength units on "
+                        "the table in a measured case, because a repaired "
+                        "thickness is not a converged ropelength.")
     a.add_argument("--strut-eps", type=float, default=0.02,
                    help="same for the strut median (default 0.02)")
 
