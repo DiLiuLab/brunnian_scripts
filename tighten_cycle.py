@@ -69,6 +69,12 @@ Usage:
         --rounds 6 --steps 30000 --symmetry Z/5Z --sym-group Cn --sym-order 5
 
     python3 tighten_cycle.py input.xyz --work-dir /tmp/run --dry-run
+
+    # continue a cycle whose driver died (crash, reboot, kill). The per-round
+    # .xyz files are the durable record; the round index, the running best and
+    # the ledger live only in the driver's memory until the cycle ends.
+    python3 tighten_cycle.py --resume --work-dir /path/outside/dropbox \
+        --rounds 8 --symmetry Z/5Z --sym-group Cn --sym-order 5
 """
 
 from __future__ import annotations
@@ -80,7 +86,7 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
 
 import numpy as np
@@ -921,6 +927,145 @@ def fmt(v, spec="8.3f"):
     return format(v, spec)
 
 
+@dataclass
+class Resumed:
+    """What could be recovered from an interrupted cycle's work directory."""
+    src: Path
+    origin: Path                 # round0 input, the reference's true source
+    current: Path                # what the next round starts from
+    start_round: int
+    best_rop: float
+    best_path: Path
+    rounds: list
+
+
+def round_output(results: Path, i: int) -> Path | None:
+    """The file round i carried forward, or None if it never finished.
+
+    A round can end on any of three files depending on which options were in
+    play, and they are produced in this order, so the most derived one that
+    exists is the one that became the next round's input.
+    """
+    for pat in (f"round{i}_refined_vu*_sym.xyz", f"round{i}_refined_vu*.xyz",
+                f"round{i}_descended_sym.xyz", f"round{i}_descended.xyz"):
+        hits = sorted(results.glob(pat))
+        if hits:
+            return hits[-1]
+    return None
+
+
+def resume_state(work: Path, results: Path, args) -> Resumed:
+    """Rebuild a cycle's state from what an interrupted run left on disk.
+
+    The driver holds the round index, the running best and the ledger rows in
+    memory and writes the ledger only when the whole cycle finishes, so a crash
+    loses every one of them while the per-round .xyz files survive. Those files
+    are the only durable record, and this reconstructs the state from them,
+    using the ledger merely to enrich it when one happens to exist.
+
+    Two things it deliberately does NOT do:
+
+      * It does not re-derive the reference polynomial from the resumed
+        configuration. Doing so would adopt whatever the interrupted run had
+        drifted to as the new definition of "unchanged", which is exactly the
+        check the gate exists to make. The caller rebuilds the reference from
+        `origin` -- round 0's input, which is preserved.
+
+      * It does not resume a descent that was cut off part-way. A round whose
+        move was applied but whose descent never produced an output is redone
+        from that round's input, and the steps already spent are reported as
+        lost rather than quietly dropped.
+    """
+    # The reference was recorded from whatever round 0 carried forward, which is
+    # the symmetrized input when the up-front symmetrize ran. Rebuilding from the
+    # unsymmetrized one would fail the integrity check for no real reason.
+    origin = next((results / name for name in
+                   ("round0_input_sym.xyz", "round0_input.xyz")
+                   if (results / name).is_file()), None)
+    if origin is None:
+        raise CycleError(
+            f"--resume found no round0 input under {results}. Point --work-dir "
+            f"at a directory an earlier cycle actually wrote, or drop --resume "
+            f"to start a new cycle.")
+
+    last = 0
+    while round_output(results, last + 1) is not None:
+        last += 1
+
+    # a round whose move landed but whose descent did not
+    partial = sorted(results.glob(f"round{last + 1}_*.xyz"))
+    if partial:
+        spent = ""
+        run_dir = work / f"run_round{last + 1}"
+        traces = sorted(run_dir.glob("*.rr/logfiles/ropelength.dat"))
+        if traces:
+            vals = []
+            for ln in traces[-1].read_text().splitlines(keepends=True):
+                if not ln.endswith("\n"):
+                    continue          # a crash leaves a half-written final line
+                r = ln.split()
+                if len(r) == 2:
+                    try:
+                        vals.append((int(r[0]), float(r[1])))
+                    except ValueError:
+                        pass
+            if vals:
+                spent = (f"; its descent had reached step {vals[-1][0]} "
+                         f"(best {min(v for _, v in vals):.4f}) -- those steps are lost, "
+                         f"resume is at round granularity")
+        print(f"  round {last + 1} was interrupted after its move but before it "
+              f"produced an output{spent}.\n  Redoing it from round {last}'s result; "
+              f"the partial files are left in place.")
+
+    # prefer the ledger's own record of each round, fall back to the files
+    rounds: list = []
+    ledger = work / "ledger.csv"
+    if ledger.is_file():
+        with ledger.open(newline="") as fh:
+            for row in csv.DictReader(fh):
+                try:
+                    idx = int(row["index"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if idx > last:
+                    continue
+                rd = Round(index=idx)
+                for k, v in row.items():
+                    if k == "index" or not hasattr(rd, k):
+                        continue
+                    if v in ("", "None"):
+                        continue
+                    f = next(fl for fl in fields(Round) if fl.name == k)
+                    try:
+                        setattr(rd, k, int(v) if f.type.startswith("int")
+                                else float(v) if "float" in f.type else v)
+                    except ValueError:
+                        setattr(rd, k, v)
+                rounds.append(rd)
+    have = {r.index for r in rounds}
+    for i in range(1, last + 1):
+        if i in have:
+            continue
+        out = round_output(results, i)
+        m = measure(out, want_struts=False)
+        rounds.append(Round(index=i, rop_descended=m.rop, kept=out.name,
+                            note="reconstructed on resume (no ledger row)"))
+    rounds.sort(key=lambda r: r.index)
+
+    # the running best, measured rather than trusted
+    best_path, best_rop = origin, measure(origin, want_struts=False).rop
+    for i in range(1, last + 1):
+        out = round_output(results, i)
+        rop = measure(out, want_struts=False).rop
+        if rop < best_rop:
+            best_rop, best_path = rop, out
+
+    current = round_output(results, last) if last else origin
+    return Resumed(src=origin, origin=origin, current=current,
+                   start_round=last + 1, best_rop=best_rop,
+                   best_path=best_path, rounds=rounds)
+
+
 def run_cycle(args) -> int:
     work = Path(args.work_dir).expanduser().resolve()
     scratch = work / "scratch"
@@ -928,16 +1073,37 @@ def run_cycle(args) -> int:
     for d in (work, scratch, results):
         d.mkdir(parents=True, exist_ok=True)
 
-    src = Path(args.input).expanduser().resolve()
-    current = results / "round0_input.xyz"
-    shutil.copy(src, current)
-
-    print(f"work dir      {work}")
-    print(f"input         {src}")
+    resumed = None
+    if args.resume:
+        print(f"work dir      {work}")
+        print("resuming from what the previous run left on disk")
+        resumed = resume_state(work, results, args)
+        src = resumed.src
+        current = resumed.current
+        print(f"  round 0 input {resumed.origin.name}")
+        print(f"  completed rounds 1..{resumed.start_round - 1}, "
+              f"best so far {resumed.best_rop:.4f} ({resumed.best_path.name})")
+        print(f"  next round    {resumed.start_round} of {args.rounds}, starting "
+              f"from {Path(current).name}")
+        mo = measure(resumed.origin, want_struts=False)
+        print(f"  cycle started at ropelength {mo.rop:.4f}; this invocation "
+              f"resumes at {measure(current, want_struts=False).rop:.4f}")
+        if resumed.start_round > args.rounds:
+            print(f"\nnothing to do: rounds 1..{args.rounds} are already complete. "
+                  f"Raise --rounds to continue.")
+            return 0
+    else:
+        src = Path(args.input).expanduser().resolve()
+        current = results / "round0_input.xyz"
+        shutil.copy(src, current)
+        print(f"work dir      {work}")
+        print(f"input         {src}")
 
     m0 = measure(current)
-    print(f"start         ropelength {m0.rop:.4f}  minRad/tau {m0.minrad_over_tau:.3f}  "
-          f"struts {m0.struts}  v/u {m0.vu:.2f}  max d/D {m0.max_dD:.4f}")
+    label = "resume at" if resumed else "start"
+    print(f"{label:<14}ropelength {m0.rop:.4f}  "
+          f"minRad/tau {m0.minrad_over_tau:.3f}  struts {m0.struts}  "
+          f"v/u {m0.vu:.2f}  max d/D {m0.max_dD:.4f}")
 
     # Symmetrize the INPUT only if it is already close enough to its symmetry.
     # The rule "tighten first, symmetrize after" exists because
@@ -945,7 +1111,7 @@ def run_cycle(args) -> int:
     # distance: measure, then decide. A layout drawn symmetric can be projected
     # immediately and for free; one in the raw-4_LC band must be descended first
     # or symmetrizing destroys the link.
-    if args.sym_group and args.sym_order:
+    if args.sym_group and args.sym_order and not resumed:
         dev = symmetry_deviation(current, args.sym_order)
         safe, why = symmetrize_is_safe(dev)
         print(f"\nsymmetry      C{args.sym_order} deviation: "
@@ -962,17 +1128,41 @@ def run_cycle(args) -> int:
                   f"ropelength {m0.rop:.4f} -> {m_sym.rop:.4f}")
             current, m0 = pre_sym, m_sym
 
-    print("\nrecording the reference polynomial (once, before anything is modified)")
-    ref_generic = to_generic_frame(current, scratch / "reference_generic.xyz")
+    # The reference is built from round 0's input, NOT from the configuration a
+    # resumed run happens to be sitting on. Re-deriving it here would adopt any
+    # drift the earlier rounds introduced as the new definition of "unchanged",
+    # which is the one thing the gate exists to catch.
+    ref_src = resumed.origin if resumed else current
+    if resumed:
+        print("\nreference polynomial: rebuilding from round 0's input")
+    else:
+        print("\nrecording the reference polynomial (once, before anything is modified)")
+    ref_generic = to_generic_frame(ref_src, scratch / "reference_generic.xyz")
     if args.dry_run:
         print("  [dry run] skipped")
     else:
-        poly = homfly_reference(current, scratch)
-        (work / "reference_homfly.txt").write_text(poly + "\n")
+        poly = homfly_reference(ref_src, scratch)
+        stored = work / "reference_homfly.txt"
+        if resumed and stored.is_file():
+            was = stored.read_text().strip()
+            if was and was != poly:
+                raise CycleError(
+                    "the reference polynomial rebuilt from round 0's input does not "
+                    "match the one this work directory recorded. Either --work-dir "
+                    "points at a different cycle's tree, or round0_input.xyz has been "
+                    "edited. Refusing to resume against a reference that is not the "
+                    "one the earlier rounds were gated on.")
+            print("  matches the polynomial recorded by the interrupted run")
+        stored.write_text(poly + "\n")
         print(f"  {poly[:96]}{'...' if len(poly) > 96 else ''}")
 
-    best_rop, best_path = m0.rop, current
-    rounds: list[Round] = []
+    if resumed:
+        best_rop, best_path = resumed.best_rop, resumed.best_path
+        rounds: list[Round] = list(resumed.rounds)
+        m0 = measure(resumed.origin)       # report progress against the true start
+    else:
+        best_rop, best_path = m0.rop, current
+        rounds = []
 
     # ------------------------------------------------------------------ #
     # Initial descent. The cycle STARTS with a contraction, and a contraction
@@ -987,7 +1177,7 @@ def run_cycle(args) -> int:
               f"to find and will be a no-op.\n         Pass --initial-steps to "
               f"descend first.")
 
-    if args.initial_steps and not args.dry_run:
+    if args.initial_steps and not args.dry_run and not resumed:
         wrap, extras, why = ([], args.rr_arg, "flags as given")
         if args.auto_flags:
             wrap, extras, why = choose_rr_flags(m0, current, args.dd_threshold)
@@ -1017,7 +1207,7 @@ def run_cycle(args) -> int:
         if rnote:
             print(f"  {rnote}")
 
-    for i in range(1, args.rounds + 1):
+    for i in range(resumed.start_round if resumed else 1, args.rounds + 1):
         rd = Round(index=i)
         print(f"\n{'=' * 72}\nround {i}\n{'=' * 72}")
 
@@ -1252,10 +1442,24 @@ def run_cycle(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("input", help="starting .xyz; blank lines separate components")
+    p.add_argument("input", nargs="?",
+                   help="starting .xyz; blank lines separate components. Omit it "
+                        "with --resume, which takes its input from the work dir.")
     p.add_argument("--work-dir", required=True,
                    help="scratch tree. Keep it OUT of Dropbox: RidgeRunner rewrites a "
                         "multi-megabyte constraint matrix continuously.")
+    p.add_argument("--resume", action="store_true",
+                   help="continue an interrupted cycle in --work-dir instead of "
+                        "starting a new one. The driver keeps the round index, the "
+                        "running best and the ledger rows in memory and writes the "
+                        "ledger only at the end, so a crash loses all of it while the "
+                        "per-round .xyz files survive; this rebuilds the state from "
+                        "those files. It restarts at the first round that produced no "
+                        "output, rebuilds the HOMFLY reference from round 0's input "
+                        "(not from the resumed configuration) and refuses to continue "
+                        "if that reference disagrees with the recorded one. A descent "
+                        "cut off part-way is NOT resumed: its round is redone and the "
+                        "spent steps are reported.")
     p.add_argument("--rounds", type=int, default=6, help="max cycles (default 6)")
     p.add_argument("--steps", type=int, default=30000,
                    help="fixed reconditioning steps per round (default 30000). "
@@ -1421,6 +1625,14 @@ def main(argv: list[str] | None = None) -> int:
     except (AttributeError, OSError):
         pass
     args = build_parser().parse_args(argv)
+    if not args.input and not args.resume:
+        print("error: give an input .xyz, or --resume to continue a cycle "
+              "already in --work-dir", file=sys.stderr)
+        return 2
+    if args.input and args.resume:
+        print("error: --resume takes its input from --work-dir; drop the input "
+              "argument", file=sys.stderr)
+        return 2
     try:
         args.squeeze_factors = sorted(float(v) for v in
                                       args.squeeze_factors.split(",") if v.strip())

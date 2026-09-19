@@ -162,6 +162,16 @@ be: ropelength = length / thickness, minimised with
     plateaus, `--vu-ladder` climbs the resolution ladder
   - HOMFLY-gates every round that needs it, symmetrises only when the measured
     deviation says it is safe, and writes `BEST.xyz` plus a per-round `ledger.csv`
+  - `--resume` continues a cycle whose driver died. The round index, the running
+    best and the ledger rows live only in the driver's memory until the cycle
+    ends, so a crash loses all three while the per-round `.xyz` files survive;
+    resume rebuilds the state from those files. It restarts at the first round
+    that produced no output, and rebuilds the HOMFLY reference from round 0's
+    input rather than from the resumed configuration — re-deriving it from where
+    the run drifted to would adopt that drift as the new definition of
+    "unchanged" — refusing to continue if the rebuilt reference disagrees with
+    the recorded one. A descent cut off part-way is not resumed: its round is
+    redone and the spent steps are reported rather than silently dropped
   - the descents are **reconditioning**, not polish: one bought +0.01 ropelength
     while restoring minRad/τ from 1.072 to 1.341 and the contact set from 785
     struts to 1260, and the next geometric move was only feasible because of it
