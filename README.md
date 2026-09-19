@@ -186,6 +186,15 @@ be: ropelength = length / thickness, minimised with
     void *enclosed* by a ring, the contraction the space *between* clusters.
     Screen both with the clearance bound — best-case `Rop = length/(minStrut/2)`
     ignoring minRad — and skip any move whose best case is already a loss
+  - for a squeeze, read the **sensitivity** column that `scan_squeeze` prints:
+    `sens = (Δτ/τ)/(ΔL/L)`, the thickness destroyed per unit of length removed.
+    An open hole is not by itself a budget — the question is whether the hole is
+    held open by slack or by the packing of the strands around it, and only
+    sensitivity can tell them apart. The admissibility margin cannot: it is a
+    ratio, so a squeeze that crushes minRad and minStrut together passes it, and
+    it is not monotone in the factor, so it rejects gentle squeezes and admits
+    violent ones. Measured across this project, squeezes at sens 1.75–3.17 all
+    won and the one at 4.08 lost twice. The column is reported, not enforced
   - `refine_xyz.py --fix-minrad` is what makes refinement viable: MinRad scales
     with edge length, so plain subdivision divides it by the refinement factor
     and inflates ropelength

@@ -777,21 +777,65 @@ class SqueezeRow:
     admissible: bool
     axis: tuple | None = None    # None = z through the centroid
     point: tuple | None = None
+    # kept last so the positional axis/point call sites stay valid
+    d_len: float = 0.0     # fraction of length the squeeze removes
+    d_tau: float = 0.0     # fraction of thickness it destroys
+    sens: float | None = None   # d_tau / d_len -- see scan_squeeze
 
 
 def scan_squeeze(src: Path, scratch: Path, factors: list[float], blend: float,
                  margin: float, axis=None, point=None) -> list[SqueezeRow]:
-    """Sweep hole-squeeze factors. Admissible = damage stays PROXIMITY.
+    """Sweep hole-squeeze factors, reporting both the margin and the SENSITIVITY.
 
     A squeeze is judged the opposite way from a contraction: its immediate
     ropelength is meaningless (it deliberately breaks thickness for RidgeRunner
-    to repair), so the test is only that minRad stays above minStrut/2 with some
-    margin -- curvature must never become the binding constraint, because
-    proximity damage is repairable and curvature damage is what stalls rounds.
+    to repair), so the admissibility test is only that minRad stays above
+    minStrut/2 with some margin -- curvature must never become the binding
+    constraint, because proximity damage is repairable and curvature damage is
+    what stalls rounds.
+
+    That margin is a RATIO, and a ratio cannot see a squeeze that crushes minRad
+    and minStrut together: both fall, the quotient holds, and the gate waves
+    through a move that has destroyed the thickness. Worse, the ratio is not
+    monotone in the factor. Measured on the 7-component link at 276.080, with
+    the driver's own blend:
+
+        f     dL/L   dtau/tau   sens   margin   gate says
+        0.95  1.09%     2.8%    2.59    1.01    rejected
+        0.80  4.26%    12.4%    2.92    0.99    rejected
+        0.40 11.96%    36.3%    3.03    0.98    rejected
+        0.30 13.67%    47.5%    3.47    1.12    ADMISSIBLE
+        0.20 15.27%    62.3%    4.08    1.45    ADMISSIBLE
+
+    The margin sags in the middle and climbs again at the extreme, so the gate
+    rejects every gentle factor and admits only the most violent ones -- and
+    `choose_move` then takes the hardest admissible. Both f=0.20 rounds run from
+    that configuration LOST (+1.12 and +1.06) while four squeezes at sens 1.75
+    to 3.17 all won.
+
+    SENSITIVITY is the quantity that separates them:
+
+        sens = (dtau/tau) / (dL/L)
+
+    how much thickness the move destroys per unit of length it removes. It is
+    the slack-versus-packing question made measurable: if the hole is genuine
+    slack the strands move inward freely and tau barely stirs; if the strands
+    ringing the hole are already packed against each other, moving them inward
+    forces contact and tau collapses. Over every squeeze this project has run,
+    wins scored 1.75 / 2.14 / 2.71 / 3.17 and the one distinct losing
+    configuration scored 4.08.
+
+    It is REPORTED, not gated on: the ordering is trustworthy and physically
+    motivated, but a threshold drawn from four wins and one distinct loss is
+    not, and changing the measurement and the selection rule in the same step
+    would make the next result impossible to attribute. Read the column; if it
+    is above roughly 3.5, expect the round to lose.
     """
     sys.path.insert(0, str(LIB))
     from radial_squeeze import apply_squeeze, apply_squeeze_about
     comps = [np.asarray(c, float) for c in read_xyz(src)]
+    m_in = measure(src, want_struts=False)
+    len0, tau0 = m_in.length, m_in.tau
     rows = []
     for f in factors:
         if point is not None:
@@ -803,10 +847,15 @@ def scan_squeeze(src: Path, scratch: Path, factors: list[float], blend: float,
         try:
             m = measure(cand, want_struts=False)
             ratio = m.minrad / (m.minstrut / 2)
+            d_len = (len0 - m.length) / len0 if len0 else 0.0
+            d_tau = (tau0 - m.tau) / tau0 if tau0 else 0.0
+            # a factor that removes nothing has no meaningful sensitivity
+            sens = (d_tau / d_len) if d_len > 1e-9 else None
             rows.append(SqueezeRow(f, m.length, m.minrad, m.minstrut, ratio,
                                    ratio >= margin,
                                    tuple(axis) if axis is not None else None,
-                                   tuple(point) if point is not None else None))
+                                   tuple(point) if point is not None else None,
+                                   d_len=d_len, d_tau=d_tau, sens=sens))
         finally:
             cand.unlink(missing_ok=True)
     return rows
@@ -863,9 +912,15 @@ def choose_move(current: Path, m_in, args, scratch: Path):
                              axis=ax, point=pt)
         ok = [r for r in srows if r.admissible]
         for r in srows:
+            flag = ""
+            if r.sens is not None and r.sens > 3.5:
+                # reported, not enforced -- see scan_squeeze
+                flag = "  <- sens high, expect a loss"
             parts.append(f"  squeeze f={r.factor:.2f}: len {r.length:9.3f}  "
+                         f"dL {r.d_len * 100:5.2f}%  dtau {r.d_tau * 100:5.1f}%  "
+                         f"sens {fmt(r.sens, '5.2f')}  "
                          f"minRad/(clear/2) {r.margin:5.2f}  "
-                         f"{'admissible' if r.admissible else 'too kinked'}")
+                         f"{'admissible' if r.admissible else 'too kinked'}{flag}")
         if ok:
             pick = min(ok, key=lambda r: r.factor)   # hardest safe squeeze
             sym_note = ("axis found by search" if args.find_axis
