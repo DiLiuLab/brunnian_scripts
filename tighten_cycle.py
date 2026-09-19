@@ -863,7 +863,13 @@ def choose_rr_flags(m: Measurement, path: Path, dd_threshold: float
 
 
 def hole_wall_radius(path: Path, tau: float) -> float:
-    """Radius of the empty cylinder about z: min centreline radius minus tau.
+    """Radius of the empty cylinder about z, IN TUBE DIAMETERS.
+
+    (min centreline radius - tau) / (2*tau). It used to return that numerator
+    raw while every caller printed it as "D", which is only harmless when tau
+    is exactly 0.5. On a file fresh from a geometric move it is not: a mirrored
+    7-component structure at tau 0.4834 had its wall reported as 1.581 when the
+    honest figure in its own diameters was 1.635.
 
     This is the hole-squeeze's whole budget. Measured on the structure that
     settled the question: a 5-component annulus stuck at 213.86 for three rounds
@@ -874,7 +880,7 @@ def hole_wall_radius(path: Path, tau: float) -> float:
     comps = [np.asarray(c, float) for c in read_xyz(path)]
     P = np.vstack(comps)
     P = P - P.mean(axis=0)
-    return float(np.hypot(P[:, 0], P[:, 1]).min() - tau)
+    return float((np.hypot(P[:, 0], P[:, 1]).min() - tau) / (2 * tau))
 
 
 @dataclass
@@ -1000,12 +1006,13 @@ def marginal_sensitivity(src: Path, scratch: Path, probe_f: float, blend: float,
                                          at every depth, so nothing can move
         5BL 202.16               2.81    untested; predicts no-go
 
-    The same structures measured at f=0.20 -- which is what the sweep's own
-    sensitivity column shows for the factor it would choose -- give 3.03 for a
-    loser and 2.99 for a winner. No separation at all. The signal exists only in
-    the limit, which is why this probes rather than reading the sweep.
+Read instead at f = 0.20 the same seven give 3.09 / 3.17 / 2.94 / 3.73 for the
+    winners and 3.81 / 4.07 / 4.08 for the others: still ordered, but the gap
+    collapses from 0.53 to 0.075, far too narrow to gate on. The signal is
+    strongest in the limit, which is why this probes rather than reading the
+    sweep.
 
-    Six structures with the boundary in a 0.5-wide gap is thin evidence, so
+    Seven structures with the boundary in a 0.5-wide gap is thin evidence, so
     --squeeze-max-sens moves the line and the measured value is always printed,
     whichever side of it the structure falls.
     """
@@ -1945,10 +1952,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "squeeze that won measured <= 2.04; the rounds that "
                          "lost measured >= 2.57. See marginal_sensitivity().")
     mv.add_argument("--squeeze-probe-f", type=float, default=0.99,
-                    help="factor for that probe (default 0.99, i.e. almost no "
-                         "squeeze at all). The signal lives in the limit: at "
-                         "f=0.20 a winning and a losing structure read 2.99 and "
-                         "3.03, indistinguishable.")
+                     help="factor for that probe (default 0.99, i.e. almost no "
+                         "squeeze at all). The signal is strongest in the limit: "
+                         "read at f=0.20 the same structures still order "
+                         "correctly but the winner/loser gap collapses from 0.53 "
+                         "to 0.075, too narrow to gate on.")
     mv.add_argument("--squeeze-margin", type=float, default=1.10,
                     help="required minRad/(minStrut/2) after the squeeze; keeps "
                          "curvature comfortably non-binding (default 1.10)")
