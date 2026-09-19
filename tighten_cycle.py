@@ -1619,13 +1619,64 @@ def run_cycle(args) -> int:
 
         if m_d.rop < best_rop:
             best_rop, best_path = m_d.rop, descended
+        rd.gain = (m_in.rop - m_d.rop)
 
-        # Carry the RECONDITIONED file forward even when it is not the shortest:
-        # its minRad and strut headroom are what make the next contraction
-        # feasible. Best-by-ropelength is tracked separately.
+        # A round that completes, keeps the link, and still ends ABOVE its own
+        # input is the case with no protection until now: rd.gain was recorded,
+        # printed, and ignored, and the worse file became the next round's
+        # input. On the 7-component link that cost three rounds -- 276.08 ->
+        # 277.20 -> back toward 276.5 -- each launched from the previous
+        # round's loss, never regaining round 1's value.
+        #
+        # The original rule carried the reconditioned file forward regardless,
+        # on the grounds that its minRad and strut headroom are what make the
+        # next move feasible. That reasoning was written for the contraction
+        # and does not survive the squeeze: round 2 above bought +0.149 of
+        # corner margin and widened the admissible window from 2 of 8 factors
+        # to 8 of 8, yet its MARGINAL sensitivity got worse, 2.57 -> 2.66. It
+        # bought conditioning the squeeze gate does not care about.
+        #
+        # So a regression keeps its file only if it genuinely improved the
+        # quantity that will decide the next move. Otherwise the chain returns
+        # to the best configuration -- and stops, because the selector is
+        # deterministic: run it again on the same configuration and it picks
+        # the same move and loses the same way, which is precisely what
+        # happened when cycle4 round 1 repeated cycle3 round 2.
+        regressed = m_d.rop > m_in.rop
+        reprieve = False
+        if regressed and not args.no_rollback and descended != best_path:
+            marg_d = marginal_sensitivity(descended, scratch,
+                                          args.squeeze_probe_f, args.squeeze_blend)
+            marg_b = marginal_sensitivity(best_path, scratch,
+                                          args.squeeze_probe_f, args.squeeze_blend)
+            if marg_d is not None and marg_b is not None:
+                # 0.05 keeps probe noise from reading as an improvement
+                reprieve = marg_d < marg_b - 0.05
+                print(f"  regressed {rd.gain:+.4f}: marginal sensitivity "
+                      f"{marg_b:.2f} (best) -> {marg_d:.2f} (this round)"
+                      + ("; kept, it improved the squeeze outlook" if reprieve
+                         else "; no gain there either"))
+            else:
+                print(f"  regressed {rd.gain:+.4f}: marginal sensitivity "
+                      f"unmeasurable, no reprieve")
+
+        if regressed and not reprieve and not args.no_rollback \
+                and descended != best_path:
+            current = best_path
+            rd.kept = Path(best_path).name
+            rd.note = ((rd.note + "; " if rd.note else "")
+                       + f"regressed {rd.gain:+.4f} and bought no squeeze "
+                         f"budget; rolled back to {Path(best_path).name} and "
+                         f"stopped (the selector would repeat this move)")
+            print(f"  ROLLED BACK to {Path(best_path).name} "
+                  f"(rop {best_rop:.4f}) and stopping")
+            rounds.append(rd)
+            break
+
+        # Carry the RECONDITIONED file forward even when it is not the
+        # shortest, when it earned that by improving the next move's gate.
         current = descended
         rd.kept = descended.name
-        rd.gain = (m_in.rop - m_d.rop)
         current, rnote = maybe_refine(current, results, f"round{i}", args,
                                       ref_generic, scratch)
         if rnote:
@@ -1902,6 +1953,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="treat an uncomputable HOMFLY as a stop. Off by default: "
                         "UNKNOWN means knottype could not build a polynomial, which is "
                         "not evidence of a change.")
+    o.add_argument("--no-rollback", action="store_true",
+                   help="keep a round's output as the next round's input even "
+                        "when the round ended ABOVE its own start and bought no "
+                        "squeeze budget. That was the behaviour before the "
+                        "rollback existed, and it let a chain wander: on one "
+                        "link three rounds ran from each other's losses without "
+                        "regaining the first round's value. BEST.xyz was never "
+                        "at risk either way; this is about what the NEXT round "
+                        "starts from.")
     o.add_argument("--dry-run", action="store_true",
                    help="measure and scan round 1, then stop without modifying anything")
     return p
