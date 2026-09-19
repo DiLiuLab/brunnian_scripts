@@ -237,7 +237,15 @@ be: ropelength = length / thickness, minimised with
     violent ones. Measured across this project, squeezes at sens 1.75–3.17 all
     won and the one at 4.08 lost twice. The column is reported, not enforced
   - `refine_xyz.py --fix-minrad` is what makes refinement viable: MinRad scales
-    with edge length, so plain subdivision divides it by the refinement factor
+    with edge length, so plain subdivision divides it by the refinement factor.
+    The cycle now refines with **both** modes and keeps whichever leaves the
+    better corner margin — neither is reliably better (on one file subdivide
+    ranged over minRad 0.33–0.61 and spline 0.45–0.52, the winner flipping by
+    target), and the margin is what the next move spends. `--refine-mode-fixed`
+    restores the single-mode behaviour
+  - `measure_link.py` reports the same squeeze verdict the driver applies. It
+    used to advertise "there is room for a hole squeeze" from the wall radius
+    alone, which recommended squeezing a structure the driver refuses
     and inflates ropelength
   - `strut_free.py` decides whether `--Timewarp` is worth its cost;
     `extract_best.py` recovers both the lowest-ropelength and the most nearly

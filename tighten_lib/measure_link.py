@@ -20,7 +20,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tighten_cycle import (measure, symmetry_deviation, symmetrize_is_safe,  # noqa: E402
-                           hole_wall_radius)
+                           hole_wall_radius, marginal_sensitivity)
 from tighten_link_xyz import read_xyz  # noqa: E402
 
 
@@ -107,11 +107,33 @@ def main() -> int:
         print("  A corner is limiting the thickness. Let RidgeRunner descend this file to")
         print("  repair it before trying another geometric move.")
     else:
-        print(f"  This looks like a tightened configuration. Empty tunnel through the middle:")
-        print(f"  wall radius {hole:.2f} D "
-              + ("-- there is room for a hole squeeze." if hole > 0.25
-                 else "-- the hole is closed; the squeeze has nothing to take."))
-        print("  Run the cycle with --choose-move and it will measure this and decide.")
+        print("  This looks like a tightened configuration. Empty tunnel through the middle:")
+        if hole <= 0.25:
+            print(f"  wall radius {hole:.2f} D -- the hole is closed; the squeeze has "
+                  f"nothing to take.")
+        else:
+            # An open hole is NOT a budget. What decides it is whether the hole is
+            # held open by slack or by the packing of the strands around it, and
+            # only the marginal cost of an infinitesimal squeeze can tell those
+            # apart. Reporting the wall radius alone told a reader to squeeze a
+            # 7-component structure whose strands were already in mutual contact
+            # at a median 1.001 D -- the same structure the cycle driver refuses.
+            import tempfile
+            with tempfile.TemporaryDirectory() as td:
+                sens = marginal_sensitivity(a.input, Path(td), 0.99, 0.5)
+            if sens is None:
+                print(f"  wall radius {hole:.2f} D, but a probe squeeze removes nothing "
+                      f"measurable -- treat the hole as closed.")
+            elif sens > 2.30:
+                print(f"  wall radius {hole:.2f} D, but squeezing it costs {sens:.2f} of")
+                print("  thickness per unit of length gained. The strands around the hole are")
+                print("  already packed against each other, so there is nowhere for them to")
+                print("  go. NO SQUEEZE -- an open hole on its own is not a budget.")
+                print("  The cycle will refuse it too. Ask me before spending time here.")
+            else:
+                print(f"  wall radius {hole:.2f} D, and squeezing it costs only {sens:.2f} of")
+                print("  thickness per unit of length gained -- there is real slack here.")
+                print("  Run the cycle with --choose-move and it will pick the factor.")
     return 0
 
 

@@ -681,11 +681,33 @@ def maybe_refine(path: Path, results: Path, tag: str, args, ref_generic: Path,
     rung = next_rung(m.vu, args.vu_ladder)
     if rung is None:
         return path, None
-    dst = results / f"{tag}_refined_vu{rung:g}.xyz"
     print(f"  refining: v/u {m.vu:.2f} -> {rung:g} "
           f"({m.vertices} vertices -> ~{round(rung * m.rop)})")
-    note = refine(path, dst, rung, args.refine_fix_minrad, args.refine_mode)
-    print(f"    {note}")
+
+    # Try BOTH modes and keep whichever leaves the better corner margin.
+    # Committing to one blind is wrong because neither is reliably better and
+    # the difference is large. Measured on one 7-component file, refining to a
+    # range of targets: subdivide returned minRad between 0.33 and 0.61,
+    # spline between 0.45 and 0.52, and which mode won flipped from target to
+    # target. Meanwhile the refinement that produced this project's best
+    # 5-component result RAISED minRad 0.5098 -> 0.6671 by spline, where plain
+    # subdivision at 2x divides minRad by two almost by construction. The
+    # margin is what the next geometric move spends, so pick on it.
+    modes = (args.refine_mode,) if args.refine_mode_fixed else ("spline", "subdivide")
+    best = None
+    for mode in modes:
+        cand = results / f"{tag}_refined_vu{rung:g}_{mode}.xyz"
+        note = refine(path, cand, rung, args.refine_fix_minrad, mode)
+        mc = measure(cand, want_struts=False)
+        print(f"    {mode:9s} rop {mc.rop:.4f}  minRad/tau {mc.minrad_over_tau:.3f}  "
+              f"[{note}]")
+        if best is None or mc.minrad_over_tau > best[1].minrad_over_tau:
+            best = (cand, mc, mode, note)
+    dst = results / f"{tag}_refined_vu{rung:g}.xyz"
+    shutil.copy(best[0], dst)
+    if len(modes) > 1:
+        print(f"    kept {best[2]} (better corner margin)")
+    note = best[3]
     if args.sym_group:
         sym = dst.with_name(dst.stem + "_sym.xyz")
         moved = symmetrize(dst, sym, args.sym_group, args.sym_order,
@@ -1874,6 +1896,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "as the curve shortens -- a raw layout at v/u 0.128 needs "
                         "7.8x the vertices to reach v/u 1.0 at its own inflated "
                         "ropelength, and gets there for nothing after one descent.")
+    i.add_argument("--refine-mode-fixed", action="store_true",
+                   help="use only --refine-mode instead of trying both and "
+                        "keeping whichever leaves the better corner margin. "
+                        "Neither mode is reliably better -- on one file "
+                        "subdivide ranged over minRad 0.33-0.61 and spline "
+                        "0.45-0.52, with the winner flipping by target -- so "
+                        "trying both is the default.")
     i.add_argument("--refine-mode", choices=("subdivide", "spline"),
                    default="subdivide",
                    help="subdivide returns a near-equilateral curve (edge max/min "
@@ -1930,9 +1959,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "circle problem per projection, ranks the top tunnels by "
                          "the length a probe squeeze actually removes. On a "
                          "trapped asymmetric 4-component link this found a 2.95 D "
-                         "tunnel whose f=0.20 squeeze removed 30%% of the length; "
-                         "on Cn-symmetric structures it recovers the symmetry "
-                         "axis by itself.")
+                         "tunnel whose f=0.20 squeeze removed 30%% of the length. "
+                         "DO NOT USE IT ON A SYMMETRIC LINK. It does not reliably "
+                         "recover the symmetry axis: on an exactly C7 structure it "
+                         "returned an axis 6.4 degrees off z, and squeezing about "
+                         "that broke C7 and aborted the round. The symmetry axis "
+                         "was also strictly better on its own terms there -- wall "
+                         "radius 1.648 D against 1.581, and 17.4%% of length "
+                         "removed against 16.9%%.")
     mv.add_argument("--axis-dirs", type=int, default=160,
                     help="directions swept by --find-axis (default 160)")
     mv.add_argument("--squeeze-factors", default="0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,0.95,0.98",
