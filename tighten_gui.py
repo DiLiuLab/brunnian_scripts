@@ -230,15 +230,20 @@ class Row:
 # window
 # --------------------------------------------------------------------------- #
 class App:
-    def __init__(self, parser):
+    """Renders any argparse parser. It imports nothing from this project: the
+    parser and the script to launch are both handed in, so the same window
+    serves tighten_cycle.py, sono_link_xyz.py or anything else with a parser."""
+
+    def __init__(self, parser, script: Path = REPO / "tighten_cycle.py"):
         self.parser = parser
+        self.script = Path(script)
         self.root = tk.Tk()
-        self.root.title("tighten_cycle — parameters")
+        self.root.title(f"{self.script.stem} — parameters")
         self.rows: list[Row] = []
 
         head = tk.Frame(self.root, bg="white", padx=14, pady=10)
         head.pack(fill="x")
-        tk.Label(head, text="tighten_cycle", bg="white", fg="#1f4e79",
+        tk.Label(head, text=self.script.stem, bg="white", fg="#1f4e79",
                  font=("Helvetica", 16, "bold")).pack(anchor="w")
         tk.Label(head, bg="white", fg="#555", justify="left",
                  font=("Helvetica", 11), wraplength=760,
@@ -311,7 +316,7 @@ class App:
         argv = self._argv()
         if argv is None:
             return None
-        return [sys.executable, str(REPO / "tighten_cycle.py")] + argv
+        return [sys.executable, str(self.script)] + argv
 
     # -- buttons ----------------------------------------------------------- #
     def build(self):
@@ -353,9 +358,9 @@ class App:
         self.root.mainloop()
 
 
-def launch(parser) -> int:
+def launch(parser, script: Path = REPO / "tighten_cycle.py") -> int:
     try:
-        App(parser).go()
+        App(parser, script).go()
     except tk.TclError as exc:
         print(f"error: cannot open a window ({exc}).\n"
               f"       Run tighten_cycle.py with --help for the command line "
