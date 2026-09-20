@@ -1716,13 +1716,15 @@ def run_cycle(args) -> int:
     # ---------------------------------------------------------------- report
     print(f"\n{'=' * 72}\nsummary\n{'=' * 72}")
     hdr = (f"{'rd':>3} {'move':>8} {'f':>6} {'contracted':>11} {'descended':>10} "
-           f"{'net':>7} {'struts':>7} {'resid':>7} {'mr/tau':>7} {'HOMFLY':>8}  note")
+           f"{'gained':>7} {'struts':>7} {'resid':>7} {'mr/tau':>7} {'HOMFLY':>8}  note")
     print(hdr)
     for r in rounds:
         print(f"{r.index:3d} {r.move[:8]:>8} {fmt(r.factor, '6.3f')} {fmt(r.rop_contracted, '11.3f')} "
               f"{fmt(r.rop_descended, '10.3f')} {fmt(r.gain, '+7.3f')} "
               f"{'-' if r.struts is None else r.struts:>7} {fmt(r.residual, '7.4f')} "
               f"{fmt(r.minrad_over_tau, '7.3f')} {r.homfly:>8}  {r.note}")
+    print("  'gained' is how much ropelength the round REMOVED: positive is an "
+          "improvement,\n  negative means the round ended above where it started.")
     print(f"\nstart {m0.rop:.4f}  ->  best {best_rop:.4f}  "
           f"({(best_rop - m0.rop) / m0.rop * 100:+.2f}%)")
     print(f"best configuration: {best_path}")

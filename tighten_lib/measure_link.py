@@ -65,7 +65,7 @@ def main() -> int:
     if m.residual is None:
         print("  residual                       -   not measurable on this file (its thickness")
         print("                                     is not at the standard 0.5), which is normal")
-        print("                                     right after a squeeze or contraction")
+        print("                                     on a raw drawing, and right after a move")
     else:
         print(f"  residual                  {m.residual:6.3f}   "
               + ("very close to ideal" if m.residual < 0.05 else
