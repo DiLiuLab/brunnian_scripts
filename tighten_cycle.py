@@ -1133,9 +1133,25 @@ def choose_move(current: Path, m_in, args, scratch: Path):
         return None, None, "\n  ".join(parts + [
             "contraction is a no-op (no contact clusters found); needs a descent"])
     pick = best_factor(rows)
+    # Print the sweep here too. Without this the rows appear ONLY on the
+    # non---choose-move path, so the recommended configuration is the one where
+    # you cannot audit the scan -- and the thing most worth auditing is whether
+    # the winner sat on the wall of its own search window.
+    parts.append(f"contraction scan {args.factor_lo}..{args.factor_hi} "
+                 f"step {args.factor_step}")
+    for r in rows:
+        parts.append(f"  f={r.factor:.3f}  len {r.length:9.3f}  "
+                     f"minRad {r.minrad:.4f}  Rop~{r.rop_est:9.3f}  "
+                     f"{'feasible' if r.feasible else 'curvature-limited'}")
     if pick is not None and m_in.rop - pick.rop_est >= args.min_gain:
         parts.append(f"-> CONTRACT f={pick.factor:.3f}: predicted rop "
                      f"{pick.rop_est:.3f} (gain {m_in.rop - pick.rop_est:.3f})")
+        if abs(pick.factor - args.factor_lo) < args.factor_step / 2:
+            parts.append(
+                f"   WARNING: the winner is AT --factor-lo ({args.factor_lo}). "
+                f"The search range was binding, not feasibility, so a better "
+                f"contraction may lie below it. Lower --factor-lo and rescan "
+                f"before trusting this round.")
         return "contract", pick, "\n  ".join(parts)
     if pick is None:
         parts.append("no feasible contraction factor")
@@ -1842,11 +1858,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="same for the strut median (default 0.02)")
 
     g = p.add_argument_group("contraction scan")
-    g.add_argument("--factor-lo", type=float, default=0.80,
-                   help="hardest contraction factor to try (default 0.80). For "
+    g.add_argument("--factor-lo", type=float, default=0.60,
+                   help="hardest contraction factor to try (default 0.60). For "
                         "a CONTRACTION the factor is how far clusters move "
                         "toward their common centre, so a lower number is the "
-                        "more aggressive move.")
+                        "more aggressive move. Widening the window is cheap and "
+                        "safe: every factor is still tested for feasibility "
+                        "(minRad > minStrut/2) and best_factor picks the LOWEST "
+                        "PREDICTED ROPELENGTH among those that pass, not the "
+                        "hardest, so an extra candidate can only be chosen by "
+                        "being better. This was 0.80 until a 5-component link "
+                        "scanned 0.80-0.99, found every factor feasible with the "
+                        "predicted gain still rising as f fell, and selected "
+                        "f=0.800 -- the wall of its own window, with nothing "
+                        "below it ever examined.")
     g.add_argument("--factor-hi", type=float, default=0.99,
                    help="gentlest contraction factor to try (default 0.99). "
                         "1.0 would be no contraction at all.")
