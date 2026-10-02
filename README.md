@@ -104,13 +104,29 @@ least 3 components.
 - `determine_duplicate_links.py`
   - checks candidate duplicate links by comparing non-geometric exteriors
   - accepts one group via `--links` or groups from `--input-file`
-- `BL_DTv2_3.py` (current)
-  - `V2_3` DT-code generator for **eight** link-construction families: the four
-    Brunnian series, Edwards' Venn (`AM_n`), Brunn's classic (`BR_n`), the
-    Fishtail bracelet, and the Mirror fishtail
+- `BL_DTv2_4.py` (current)
+  - `V2_4` DT-code and Jones-polynomial generator for **eight**
+    link-construction families: the four Brunnian series, Edwards' Venn
+    (`AM_n`), Brunn's classic (`BR_n`), the Fishtail bracelet, and the Mirror
+    fishtail
   - accepts `--pattern` and `--n` in CLI mode; `--list-patterns` to enumerate
   - opens a Tkinter GUI when run without arguments or with `--gui`
   - defaults: n = 7 for the four original families, n = 5 for the rest
+  - **V2_4: Jones polynomials.** Every pattern now also prints V(t), and V(q)
+    with t = q^2, for the chosen n. They are computed exactly in plain Python
+    (no SnapPy or Sage), from the DT code plus a closed sign rule per family,
+    so the method is described in each family's formula text. See
+    [Jones polynomials](#jones-polynomials) below.
+  - **V2_4: preview images.** In V2_3 the Edwards' Venn and Brunn's classic
+    snapshots were swapped. They are now the `BL_series_2D` drawings of AM_5
+    and BR_5 (see [BL_DT Pattern Snapshots](#bl_dt-pattern-snapshots)).
+  - **V2_4: braid sign convention, reworded.** V2_3 described the Edwards'
+    Venn and Brunn's classic codes as "an even label is positive iff its pass
+    is an over-pass", with s_i taking the lower strand over. That is the
+    opposite of how SnapPy, KnotTheory and `dt_strand_passage` read a DT
+    code. The text now says what those readers see: a negative even label
+    marks an over-pass, and s_i takes the strand in position i under the one
+    in position i+1. The codes themselves are unchanged.
   - **V2_3 correction:** V2_2 and earlier emitted the *mirrored* stitch under
     the name `fishtail`. The true fishtail is the same-fold wrap, identified by
     the fact that its grip-span-1 reduction is the classical chain
@@ -120,8 +136,8 @@ least 3 components.
     share all 16 unsigned entries and differ in 8 signs; they are distinct
     links (n = 5 volumes 91.7463 vs 92.7683).
 - `previous/`
-  - earlier versions, including `BL_DTv2_1.py` and `BL_DTv2_2.py`, kept for
-    reproducibility of previously generated output
+  - earlier versions, including `BL_DTv2_1.py`, `BL_DTv2_2.py` and
+    `BL_DTv2_3.py`, kept for reproducibility of previously generated output
   - this directory is listed in `.gitignore`, so it is a local archive rather
     than part of the repository; a fresh clone will not contain it
 
@@ -320,30 +336,86 @@ Duplicate-link check with CSV output:
 python3 determine_duplicate_links.py --input-file Examples/duplicate_candidate_groups.txt --output Run_results/duplicate_candidate_groups.csv
 ```
 
-Generate a DT code from one of the four construction families:
+Generate a DT code and its Jones polynomial from one of the four construction
+families:
 
 ```bash
-python3 BL_DTv2_3.py --pattern cyclic_larks --n 7
+python3 BL_DTv2_4.py --pattern cyclic_larks --n 7
 ```
 
 Generate the corrected fishtail code (and the mirrored variant):
 
 ```bash
-python3 BL_DTv2_3.py --pattern fishtail --n 5
-python3 BL_DTv2_3.py --pattern mirror_fishtail --n 5
+python3 BL_DTv2_4.py --pattern fishtail --n 5
+python3 BL_DTv2_4.py --pattern mirror_fishtail --n 5
+```
+
+Skip the Jones polynomial, or compute it above the default n limit:
+
+```bash
+python3 BL_DTv2_4.py --pattern brunn_classic --n 9 --no-jones
+python3 BL_DTv2_4.py --pattern brunn_classic --n 9 --force-jones
 ```
 
 Open the GUI:
 
 ```bash
-python3 BL_DTv2_3.py
+python3 BL_DTv2_4.py
 ```
 
 List accepted canonical pattern names:
 
 ```bash
-python3 BL_DTv2_3.py --list-patterns
+python3 BL_DTv2_4.py --list-patterns
 ```
+
+## Jones polynomials
+
+`BL_DTv2_4.py` prints the Jones polynomial of the emitted DT code, written as
+both V(t) and V(q) with t = q^2. Every result is checked against
+V(1) = (-2)^(n-1).
+
+- **Method.** A Kauffman-bracket state sum, contracted one crossing at a time
+  while keeping only how the open edges pair up, then
+  V = (-A^3)^(-w) <D> with A = t^(-1/4). The right-handed trefoil has
+  V = t + t^3 - t^4. The bracket needs only the Gauss pairing and the
+  crossing signs, because the A-smoothing is the oriented smoothing at a
+  positive crossing and the unoriented one at a negative crossing. The signs
+  are the only planar input, and each family has a closed rule for them:
+  - Cyclic families (squares, larks, rubberband, both fishtails): every
+    crossing has the same handedness, so the crossing at DT entry a_i has
+    sign sgn(a_i)·sgn(a_1).
+  - `AM_n` and `BR_n`: the sign of the crossing's braid letter, normalized
+    by the letter at label 1.
+  - Linear rubberband: a short per-component pattern, printed in the formula
+    text.
+
+  These rules match SnapPy's realization of the code for n = 3..20, and
+  n = 3..8 for the braid families.
+- **Mirror convention.** A DT code fixes a link only up to mirror image. The
+  polynomial printed is that of the link SnapPy/spherogram builds from the
+  code: a negative even entry marks an even over-pass, and crossing 1 is
+  positive. This is the same choice `dt_converter.py --polynomials` makes in
+  `dt_strand_passage`, and the mirror image has V(1/t). The choice only
+  matters for the Mirror fishtail, whose V(t) is not palindromic (it is
+  chiral). Every other family's V(t) is palindromic over the computed range.
+- **Verification.** The 24 polynomials in `../BL_series_2D/BL_scripts`
+  (`BL_list.xlsx`; n = 3..6 for six families, from transfer-matrix and Sage
+  braid computations) are reproduced exactly. Both fishtails at n = 3 match
+  `dt_converter.py` term for term.
+- **Observed identities** (not proofs):
+  - Cyclic larks and cyclic squares have the same V(t) for n = 3..40.
+  - `AM_n` and `BR_n` have the same V(t) for n = 3..8, consistent with their
+    shared isometry signature at n = 5.
+- **Cost and default limits.** The linear families cost roughly linearly in n
+  (cyclic rubberband n = 40 in 0.7 s). The braid families follow the braid
+  word, so the frontier holds Catalan(n) states: AM_8 took 6.5 s and BR_8
+  22 s. The fishtail frontier saturates at about 12,500 states from n = 8 on,
+  and n = 12 took 13 s. By default V(t) is computed for n <= 8 (AM, BR),
+  n <= 12 (fishtails), n <= 120 (cyclic rubberband) and n <= 200 (the rest).
+  `--force-jones`, or **Compute Jones anyway** in the GUI, lifts the limit.
+  The GUI computes in a background thread and cancels a run when the input
+  changes.
 
 ## BL_DT Pattern Snapshots
 
@@ -357,6 +429,15 @@ are missing.
 stitch, matching the V2_2 code. It now shows the true fishtail, and the old
 figure is kept as `Assets/mirror fishtail.png` for the `mirror_fishtail`
 pattern.
+
+**Note (October 2026, V2_4):** in V2_3, `Assets/Edward.png` showed Brunn's
+classic and `Assets/Brunn.png` showed Edwards' Venn. Both now come from the
+n = 5 drawings in `../BL_series_2D` (`link_diagram-BL_Edw_5.svg` and
+`link_diagram-BL_Bru_5.svg`, rasterized without their caption line). Each
+drawing's crossing count matches its formula (30 = 2^5 - 2 and
+44 = 3·2^4 - 4). The new Edwards' Venn drawing closes the two lines with
+semicircles, so all 30 crossings are visible; the old one collapsed those two
+rings onto overlapping lines.
 
 The figures were prepared with the `draw_dt_original_labels` tool in
 [DiLiuLab/dt_strand_passage_explorer](https://github.com/DiLiuLab/dt_strand_passage_explorer).
