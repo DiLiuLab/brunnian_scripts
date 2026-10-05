@@ -86,6 +86,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
 
@@ -231,48 +232,57 @@ def strut_radius_for(tau: float) -> float:
 
 
 def measure(path: Path, want_struts: bool = True) -> Measurement:
+    """octrope's numbers for a file, plus struts and the residual when asked.
+
+    The scratch .vect lives in a temporary directory and every binary runs with its
+    cwd there: `residual` dumps A.dat, A.mat, A.sparse, b.dat and b.mat (up to about
+    250 MB) into its cwd, which used to be the caller's (the repository, a Dropbox
+    folder). The directory, dumps included, is removed on return."""
     comps = [np.asarray(c, float) for c in read_xyz(path)]
-    vect = path.with_suffix(".cyc.vect")
-    write_vect(vect, [c.tolist() for c in comps])
-    try:
-        out = _run(["ropelength", str(vect)])
-        rop = _grab(out, "Ropelength")
-        tau = _grab(out, "Thickness")
-        minrad = _grab(out, "minRad")
-        minstrut = _grab(out, "minStrut")
-        if None in (rop, tau, minrad, minstrut):
-            raise CycleError(f"could not parse octrope output for {path.name}:\n{out}")
+    with tempfile.TemporaryDirectory(prefix="tighten_measure_") as td:
+        vect = Path(td) / (path.stem + ".cyc.vect")
+        write_vect(vect, [c.tolist() for c in comps])
+        return _measure_vect(path, comps, vect, want_struts)
 
-        r = strut_radius(tau, minstrut)
-        struts = residual = None
-        if want_struts:
-            st = _run(["struts", "-s", "-n", "-r", f"{r:.9f}", str(vect)])
-            m = re.search(r"Sorting (\d+) struts", st) or re.search(r"(\d+) struts", st)
-            struts = int(m.group(1)) if m else None
-            # Only a normalised file has a meaningful ridgerunner residual. On a
-            # freshly contracted file the contact set straddles two different
-            # spacings (the new closest approach and the pre-contraction 1.0 D),
-            # so every radius is wrong: the file's own tau finds 7 struts at
-            # residual 0.98, the nominal finds 1484 at residual 0.0. Report it as
-            # unavailable rather than pick one and be believed.
-            if is_normalised(tau):
-                residual = _grab(_run(["residual", "-r", f"{r:.9f}", str(vect)]),
-                                 "Residual")
 
-        edges = np.concatenate(
-            [np.linalg.norm(np.diff(np.vstack([c, c[:1]]), axis=0), axis=1) for c in comps]
-        )
-        L = float(edges.sum())
-        N = int(sum(len(c) for c in comps))
-        D = 2 * tau
-        return Measurement(
-            path=str(path), rop=rop, tau=tau, minrad=minrad, minstrut=minstrut,
-            length=L, vertices=N, struts=struts, residual=residual,
-            mean_dD=float(edges.mean() / D), max_dD=float(edges.max() / D),
-            vu=N / rop, minrad_over_tau=minrad / tau, strut_radius=r,
-        )
-    finally:
-        vect.unlink(missing_ok=True)
+def _measure_vect(path: Path, comps, vect: Path, want_struts: bool) -> Measurement:
+    cwd = vect.parent
+    out = _run(["ropelength", str(vect)], cwd=cwd)
+    rop = _grab(out, "Ropelength")
+    tau = _grab(out, "Thickness")
+    minrad = _grab(out, "minRad")
+    minstrut = _grab(out, "minStrut")
+    if None in (rop, tau, minrad, minstrut):
+        raise CycleError(f"could not parse octrope output for {path.name}:\n{out}")
+
+    r = strut_radius(tau, minstrut)
+    struts = residual = None
+    if want_struts:
+        st = _run(["struts", "-s", "-n", "-r", f"{r:.9f}", str(vect)], cwd=cwd)
+        m = re.search(r"Sorting (\d+) struts", st) or re.search(r"(\d+) struts", st)
+        struts = int(m.group(1)) if m else None
+        # Only a normalised file has a meaningful ridgerunner residual. On a
+        # freshly contracted file the contact set straddles two different
+        # spacings (the new closest approach and the pre-contraction 1.0 D),
+        # so every radius is wrong: the file's own tau finds 7 struts at
+        # residual 0.98, the nominal finds 1484 at residual 0.0. Report it as
+        # unavailable rather than pick one and be believed.
+        if is_normalised(tau):
+            residual = _grab(_run(["residual", "-r", f"{r:.9f}", str(vect)], cwd=cwd),
+                             "Residual")
+
+    edges = np.concatenate(
+        [np.linalg.norm(np.diff(np.vstack([c, c[:1]]), axis=0), axis=1) for c in comps]
+    )
+    L = float(edges.sum())
+    N = int(sum(len(c) for c in comps))
+    D = 2 * tau
+    return Measurement(
+        path=str(path), rop=rop, tau=tau, minrad=minrad, minstrut=minstrut,
+        length=L, vertices=N, struts=struts, residual=residual,
+        mean_dD=float(edges.mean() / D), max_dD=float(edges.max() / D),
+        vu=N / rop, minrad_over_tau=minrad / tau, strut_radius=r,
+    )
 
 
 def to_generic_frame(src: Path, dst: Path) -> Path:
@@ -386,14 +396,29 @@ def homfly_reference(ref_xyz: Path, scratch: Path) -> str:
     return m.group(1).strip()
 
 
+# verify_topology.py's per-candidate words, mapped to this driver's verdicts. It
+# prints "  CHANGED name" for a different polynomial and "  ERROR  name: ..." for
+# a candidate it could not read; the parser used to look for the word DIFFERENT,
+# which verify_topology never prints, so a changed link read UNKNOWN and every
+# "!= DIFFERENT" gate let it through.
+HOMFLY_TOKENS = (("DIFFERENT", ("CHANGED", "DIFFERENT")),
+                 ("UNKNOWN", ("UNKNOWN", "ERROR")),
+                 ("SAME", ("SAME",)))
+
+
+def parse_homfly_verdict(out: str) -> str:
+    """verify_topology.py output -> 'SAME', 'DIFFERENT' or 'UNKNOWN'."""
+    for verdict, words in HOMFLY_TOKENS:
+        if any(re.search(rf"^\s*{w}\b", out, re.M) for w in words):
+            return verdict
+    return "UNKNOWN"
+
+
 def homfly_verdict(ref_generic: Path, candidate: Path, scratch: Path) -> str:
     """Returns 'SAME', 'DIFFERENT' or 'UNKNOWN' (uncomputable, not a change)."""
     gen = to_generic_frame(candidate, scratch / (candidate.stem + "_generic.xyz"))
     out = _run([sys.executable, REPO / "verify_topology.py", ref_generic, gen])
-    for verdict in ("DIFFERENT", "UNKNOWN", "SAME"):
-        if re.search(rf"^\s*{verdict}\b", out, re.M):
-            return verdict
-    return "UNKNOWN"
+    return parse_homfly_verdict(out)
 
 
 def contract(src: Path, dst: Path, factor: float, join: float | None = None) -> None:
