@@ -26,8 +26,8 @@ def thickness_of(comps, tmp):
     write_vect(tmp, [c.tolist() for c in comps])
     out = subprocess.run(["ropelength", str(tmp)], capture_output=True, text=True)
     txt = out.stdout + out.stderr
-    tau = re.search(r"(?<![A-Za-z] )Thickness:\s*([0-9.eE+-]+)", txt)
-    rop = re.search(r"(?<![A-Za-z] )Ropelength:\s*([0-9.eE+-]+)", txt)
+    tau = re.search(r"(?<![A-Za-z] )Thickness:\s*([0-9.eE+-]+|inf(?:inity)?)", txt)
+    rop = re.search(r"(?<![A-Za-z] )Ropelength:\s*([0-9.eE+-]+|inf(?:inity)?)", txt)  # octrope prints "infinity" at thickness 0
     return (float(tau.group(1)) if tau else None,
             float(rop.group(1)) if rop else None)
 
