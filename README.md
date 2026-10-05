@@ -223,6 +223,20 @@ be: ropelength = length / thickness, minimised with
     initial descents gate on all three. Truncation **propagates** — 7BL round 1
     stopping early meant round 2 began from a less converged input — so run any
     round you will report with the full gate
+  - `--slp final` (opt-in; the default is `off`) ends the cycle with the
+    equivariant SLP polish (`tighten_lib/slp_tighten.py`, below) on the best
+    normalised file, in the group the run used unless `--slp-group` says
+    otherwise. The defaults run one pass with no resample; for the 8BL recipe
+    add `--slp-passes 2 --slp-resample-vu 6`. Alternatively, `--slp plateau`
+    polishes after each round's descent (not the initial descent) of a
+    symmetric run that leaves the residual above `--slp-trigger-residual`
+    (0.1) with more than 200 struts; it does not also run the final polish,
+    and the next round still continues from the descended file unless
+    `--slp-carry` is given. Either way the result is kept only on HOMFLY SAME
+    and a gain of more than `--slp-min-gain` (0.05), and is recorded as
+    link-gated, not diagram-checked. `--slp-arg` passes further flags to the
+    tool, but not `--elo`, `--ehi` or `--allow-edge-collapse`: the stage's
+    collapse guard is measured against the default edge bounds
 - `tighten_lib/`
   - the geometric moves, symmetry tooling, resolution changes and diagnostics,
     each documented in `tighten_lib/README.md`
@@ -266,6 +280,75 @@ be: ropelength = length / thickness, minimised with
   - `strut_free.py` decides whether `--Timewarp` is worth its cost;
     `extract_best.py` recovers both the lowest-ropelength and the most nearly
     critical snapshot, which diverge
+- `tighten_lib/slp_tighten.py`
+  - the **equivariant sequential-LP polish**: per-vertex displacements
+    restricted to the exact symmetry subspace (C1, Cs, Ci, Cn, Cnv, Cnh, RDn,
+    Dnd, S2n, via `tighten_lib/symmetry_maps.py`). Each LP minimises length
+    subject to linearised no-approach constraints on near pairs, both Rawdon
+    minRad branches >= tau, and edge-length bounds, inside a trust region, and
+    the step is projected back onto the exact symmetry. A step is accepted only
+    if octrope's ropelength falls AND a PL isotopy certificate proves the
+    straight-line step stays embedded
+  - why it exists: `--Symmetry` forces the Animation stepper, which "won't
+    converge to low residual", so a symmetric run can park well above
+    residual 0.1. The 8BL RD2 legs ended at 0.31-0.43, the 7BL (C7) best at
+    0.322 and the lark (C5) best at 0.263, and on all three the floor was the
+    stepper's, not the configuration's: the SLP lowered ropelength and
+    residual together. It is not universal: 4BL_wider under C2v stopped on its
+    residual criterion at 0.0146, so the trigger is a measurement
+    (residual > 0.1, or `--diagnose`), not the presence of `--Symmetry`
+  - on 8BL D2d, after every geometric move had returned nothing or lost, the
+    hand-run slp_B chain (the campaign's own scripts, run step by step) took
+    298.242 -> 291.748, residual 0.307 -> 0.010. That file is the one with a
+    diagram check
+  - this tool, as shipped (link-gated: HOMFLY SAME, exact symmetry,
+    cert_rejects 0):
+    - the 8BL recipe, `--group D2d --passes 2 --resample-vu 6`: 298.242 ->
+      291.745 in 618 s, residual 0.005, 2486 struts
+    - one pass, the default: 7BL (C7) 274.365 -> 272.816 (residual 0.322 ->
+      0.147; it stopped at `--dmin` after 664 s of a 15-minute budget), lark
+      (C5) 210.041 -> 202.282 (0.263 -> 0.136; stopped on the 15-minute
+      budget) and 4_LC (Cs) 113.590 -> 113.049 (0.259 -> 0.141; 4-minute
+      budget)
+  - the designer's prototype (`slp_generic_probe_v2.py`, the code this tool
+    was built from) reached 7BL 273.910, lark 204.141 and 4_LC (Cs) 113.036.
+    Its 7BL run stopped at `--dmin` after 119 s, probably on the defect the
+    tool now avoids: once an accepted step had dipped the thickness, the rows
+    still asked for the pass's starting thickness, the LP went infeasible and
+    the trust region shrank to nothing. A pass now rebuilds the rows at the
+    iterate's own thickness when that happens (`floor_rebuilds` in the
+    `SLP RESULT` line: 0 on 8BL, 13 on 7BL, 3 on lark)
+  - below a residual of about 0.1 it buys almost nothing (4BL_wider, C2v:
+    112.194 -> 112.1905); use the default-stepper `--no-eq` polish there
+  - edge bounds are **not optional**: without them an end-ring edge collapsed
+    (ratio 125, rop 297.035) and HOMFLY still said SAME. They are on by
+    default, 0.8-1.25 of each component's mean edge, and only
+    `--allow-edge-collapse` turns them off (and the cycle's `--slp-arg` will
+    not pass it)
+  - it changes geometry and does not check topology, so gate its output:
+    `--gate-ref REF` exits 4 unless HOMFLY is SAME in the cycle's generic
+    frame, and `tighten_cycle.py --slp final` replaces `BEST.xyz` only on
+    HOMFLY SAME and a gain of more than `--slp-min-gain` (0.05)
+  - the gate is on the **link, not the diagram**: HOMFLY cannot see a diagram,
+    so the diagram may change. Check it with a diagram-isomorphism tool before
+    quoting a per-diagram minimum. The drops on the 5BL lark (C5; 202.282 is
+    below the 205.44 file that crossed into the square basin and 0.12 above
+    5BL_square's 202.158), 4_LC, 2_BC and 7BL are findings that still need
+    that check
+  - its output is often curvature-active (minRad = minStrut/2 = tau: 8BL,
+    4_LC, and 7BL after its full run), but not always (lark ends at
+    minRad/tau 1.034, and 7BL after the cycle's 2-minute stage at 1.108).
+    Either way do not re-descend it: on 8BL every ridgerunner restart cost
+    +0.36 to +0.38 at once. `measure_link.py` reads a curvature-active file
+    with more than 200 struts as "contact AND curvature both active" at any
+    residual, calls it converged below residual 0.1, and above that advises
+    another SLP pass rather than a descent; a contact-limited output such as
+    lark's still gets the old "room to descend" wording
+  - `--diagnose` prints the first-order feasible fraction of the length
+    gradient (13.7% on 8BL at 298.242; about 0 means critical), and
+    `--group detect` lists which of its 38 candidate groups the file holds
+    exactly, in the canonical frame (axis z, reference x) unless `--axis` and
+    `--ref` say otherwise
 - `ridgerunner_patches/`
   - a diff against RidgeRunner 2.3.1 adding `Ci`, `Cs`, `Cpv` and `RDp` plus an
     explicit symmetry axis and reference direction, a build script that installs
@@ -275,6 +358,41 @@ be: ropelength = length / thickness, minimised with
   - `--Symmetry` forces `--AnimationStepper` and changes the equilateralisation
     regime, so a constrained arm cannot be compared against an ordinary one
     without a control that passes `--AnimationStepper` too
+  - the same stepper "won't converge to low residual", by its own help. A
+    symmetric run can park well above residual 0.1 (8BL RD2 legs 0.31-0.43,
+    7BL C7 0.322, lark C5 0.263), and there the floor was the stepper's, not
+    the configuration's; `tighten_lib/slp_tighten.py` is the polish for it.
+    Not every symmetric run parks: 4BL_wider under C2v stopped on its
+    residual criterion at 0.0146
+
+**Deferred, not in the SLP change (2026-10-05):**
+
+- `choose_rr_flags` in `tighten_cycle.py` does not know about `--symmetry`.
+  It selects `--eq` whenever the residual is above 0.1, ridgerunner turns
+  EqOn off under `--Symmetry`, and the stepper often keeps the residual
+  above 0.1, so under a symmetry the `--eq` it selects never runs (only its
+  `--Timewarp` does)
+- `_build_descend_cmd` passes `--symmetry` to `tighten_link_xyz.py` but not
+  `--ridgerunner`, `--symmetry-axis`, `--symmetry-ref` or `--decimals`. The
+  cycle therefore cannot run a non-default frame (8BL's RD2 legs needed
+  `--SymmetryRef=1,1,0`), and its descents are written at the driver's default
+  9 decimals
+- the D2d symmetrizer's continuous mode, which projects a raw drawing whose
+  vertices do not correspond, stays in the 8BL D2d campaign's
+  `tools/d2d_symmetrize.py`, outside this repository. `symmetry_maps.py`
+  handles only files that are already vertex-exact; `slp_tighten.py` will
+  project a file that is within 0.05 mean edges of exact, once
+- also not done: replacing the Cn-only `symmetry_deviation` with
+  `symmetry_maps`, and a diagram-basin gate (the 8BL `final_diagram_check.py`
+  assumes a fixed 48-crossing target and raw reference)
+
+Done in the same change: `measure()` in `tighten_cycle.py`, which
+`measure_link.py` also uses, now writes its scratch `.vect` into a temporary
+directory and runs octrope's `ropelength`, `struts` and `residual` there. Until
+2026-10-05 both scripts ran `residual` in the current directory, which dropped
+its A.dat/A.mat dumps (246 MB each for a 1748-vertex file) wherever they were
+started, the repository included. `extract_best.py` and `strut_free.py` still
+call `residual` without a temporary cwd, so run those from a work directory.
 
 ## Examples
 

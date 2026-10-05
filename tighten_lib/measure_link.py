@@ -50,9 +50,22 @@ def main() -> int:
 
     # --- health checks, each with a verdict -------------------------------
     print("HEALTH CHECKS")
-    lim = "contact (strands touching)" if m.strut_limited else "CURVATURE (a sharp corner)"
+    # Contact and curvature binding TOGETHER on a healthy contact set is not a
+    # damaged corner, whatever the residual: it is where the equivariant SLP often
+    # ends (the hand-run slp_B chain's 8BL D2d 291.748 has minRad = minStrut/2 =
+    # tau, 2416 struts, residual 0.010; slp_tighten.py ends similarly at 291.745;
+    # its 4_LC Cs 113.049 the same at residual 0.141). The old wording told the
+    # reader to re-descend such a file. The residual only decides whether it is
+    # converged (< 0.1) or wants another SLP pass.
+    both_active = (abs(m.minrad / m.tau - 1) < 1e-4
+                   and abs(m.minstrut / (2 * m.tau) - 1) < 1e-4
+                   and (m.struts or 0) > 200)
+    converged = both_active and m.residual is not None and m.residual < 0.1
+    lim = ("contact AND curvature both active" if both_active else
+           "contact (strands touching)" if m.strut_limited else
+           "CURVATURE (a sharp corner)")
     print(f"  what sets the thickness   {lim}")
-    if not m.strut_limited:
+    if not m.strut_limited and not both_active:
         print("      ^ a corner is limiting the tube, not strands touching. On a freshly drawn")
         print("        layout this is normal and a descent fixes it. On a file that came out of")
         print("        a squeeze or contraction it means the move was too aggressive.")
@@ -70,7 +83,9 @@ def main() -> int:
         print(f"  residual                  {m.residual:6.3f}   "
               + ("very close to ideal" if m.residual < 0.05 else
                  "near critical" if m.residual < 0.1 else
-                 "still far from ideal -- there is room to descend"))
+                 "still far from ideal -- room left for another SLP pass" if both_active else
+                 "still far from ideal -- there is room to descend (if this file came out of\n"
+                 "                                     slp_tighten.py, run another SLP pass instead: a descent pays the restart cost)"))
     print(f"  points per unit length    {m.vu:6.2f}   "
           + ("fine" if m.vu >= 4 else
              "coarse -- consider refining" if m.vu >= 2 else
@@ -103,6 +118,23 @@ def main() -> int:
     if m.max_dD > 0.5 or (m.struts or 0) < 50:
         print("  This link is not tightened yet. Run the cycle with --initial-steps 30000")
         print("  so RidgeRunner descends it before any geometric move is attempted.")
+    elif converged:
+        print("  This is a converged, curvature-active configuration (typical after the")
+        print("  equivariant SLP, tighten_lib/slp_tighten.py). Do not re-descend it; a")
+        print("  restart costs about +0.35 and 13.7k-16.3k steps to recover (measured on")
+        print("  8BL D2d, 2026-10-04).")
+    elif both_active:
+        if m.residual is None:
+            print("  Contact and curvature are both active, but the residual cannot be")
+            print("  measured at this thickness, so whether it is converged is unknown.")
+        else:
+            print("  Contact and curvature are both active, but this is NOT converged")
+            print(f"  (residual {m.residual:.3f}, not below 0.1).")
+        print("  Run another slp_tighten.py pass on it rather than a RidgeRunner descent:")
+        print("    python3 tighten_lib/slp_tighten.py FILE -o OUT --group <the run's group> \\")
+        print("        --gate-ref FILE")
+        print("  A descent pays the restart cost, about +0.35 and 13.7k-16.3k steps to")
+        print("  recover (measured on 8BL D2d, 2026-10-04).")
     elif not m.strut_limited:
         print("  A corner is limiting the thickness. Let RidgeRunner descend this file to")
         print("  repair it before trying another geometric move.")

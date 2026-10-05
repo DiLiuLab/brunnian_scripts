@@ -75,14 +75,38 @@ Usage:
     # the ledger live only in the driver's memory until the cycle ends.
     python3 tighten_cycle.py --resume --work-dir /path/outside/dropbox \
         --rounds 8 --symmetry Z/5Z --sym-group Cn --sym-order 5
+
+    # polish the final best with the equivariant SLP (tighten_lib/slp_tighten.py)
+    python3 tighten_cycle.py input.xyz --work-dir /path/outside/dropbox \
+        --rounds 6 --symmetry Z/7Z --sym-group Cn --sym-order 7 --slp final
+
+SLP POLISH (--slp, off by default). Under --symmetry the patched ridgerunner is
+forced onto the Animation stepper, and a symmetric run CAN park well above
+residual 0.1 (8BL RD2 legs 0.31-0.43, 7BL C7 0.322, lark C5 0.263); there the
+floor was the stepper's, not the configuration's. It is not universal
+(4BL_wider under C2v stopped on residual 0.0146), so the trigger is measured.
+--slp final runs the equivariant sequential LP once, after the last round, on
+the best file that is not a raw contraction; --slp plateau instead runs it
+after each round's descent (not the initial one) of a --symmetry run that ends
+at residual > --slp-trigger-residual with more than 200 struts, and not at the
+end. The defaults are one pass and no resample; on 8BL D2d the recipe
+(--slp-passes 2 --slp-resample-vu 6) reaches 291.745 (the hand-run chain:
+291.748). Its output replaces the best only on HOMFLY SAME (UNKNOWN is not
+enough), a gain of more than --slp-min-gain, a normalised tau, exact symmetry
+and no collapsed edge. The gate is on the LINK, not the diagram: check a
+per-diagram minimum with a diagram-isomorphism tool before quoting it.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import io
 import json
+import math
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1188,6 +1212,567 @@ def choose_move(current: Path, m_in, args, scratch: Path):
 
 
 # --------------------------------------------------------------------------- #
+# the SLP polish (tighten_lib/slp_tighten.py)
+# --------------------------------------------------------------------------- #
+
+SLP_TOOL = LIB / "slp_tighten.py"
+SLP_TAU_FLOOR = 0.4995          # finish_leg.sh's floor on an accepted polish
+SLP_MAX_PROJECTION = 0.05       # ropelength a near-symmetric input may pay to be projected
+SLP_MIN_STRUTS = 200            # --slp plateau: a healthy contact set, not a degenerate run
+
+# symmetrize_link_xyz.py --group (with its aliases) -> the SLP group; n is --sym-order
+_SLP_FROM_SYM_GROUP = {"Cn": "C{n}", "Zp": "C{n}", "Cnv": "C{n}v",
+                       "Cs": "Cs", "mirror": "Cs", "Ci": "Ci"}
+
+_SLP_FIXED_BOUNDS = ("slp_tighten.py by hand: the stage keeps the default edge bounds 0.8/1.25, "
+                     "which its collapse guard is measured against")
+
+# slp_tighten.py options the stage sets itself. Passing one through --slp-arg
+# would silently override what the cycle asked for (or, for --diagnose and
+# --dry-run, make the tool exit without writing anything).
+_SLP_OWNED = {"output": "-o", "group": "--slp-group", "order": "--slp-group",
+              "axis": "--slp-axis", "ref": "--slp-ref",
+              "max_minutes": "--slp-minutes", "passes": "--slp-passes",
+              "resample_vu": "--slp-resample-vu",
+              "diagnose": "slp_tighten.py --diagnose by hand",
+              "dry_run": "the cycle's own --dry-run",
+              # The edge bounds are the collapse guard's floor (slp_accept rule 6). Passing
+              # them through would move the guard that keeps an slp1-style collapse out of
+              # BEST.xyz, so the stage fixes them at the tool's defaults.
+              "elo": _SLP_FIXED_BOUNDS, "ehi": _SLP_FIXED_BOUNDS,
+              "allow_edge_collapse": _SLP_FIXED_BOUNDS}
+
+
+def _symmetry_maps():
+    """tighten_lib/symmetry_maps.py, imported on first use."""
+    if str(LIB) not in sys.path:
+        sys.path.insert(0, str(LIB))
+    import symmetry_maps
+    return symmetry_maps
+
+
+def _slp_tool():
+    """tighten_lib/slp_tighten.py as a module, for its argument parser only."""
+    if str(LIB) not in sys.path:
+        sys.path.insert(0, str(LIB))
+    import slp_tighten
+    return slp_tighten
+
+
+def _canonical_group(spec: str, order: int | None = None) -> str:
+    """symmetry_maps' label for a spec ('Z/5Z' -> 'C5'); order fills a generic n."""
+    sm = _symmetry_maps()
+    try:
+        g = sm.parse_spec(spec)
+    except sm.SymmetryMapError:
+        if order is None:
+            raise
+        g = sm.parse_spec(spec, order)
+    if g.kind == "detect":
+        raise sm.SymmetryMapError(
+            "'detect' only lists groups: run tighten_lib/slp_tighten.py FILE --group detect, "
+            "then pass the one the run used to --slp-group")
+    return g.label
+
+
+def slp_group(args) -> tuple[str, str]:
+    """The SLP polish's group, and which rule chose it. The first rule that applies wins:
+
+      1. --slp-group, as given.
+      2. --sym-group with --sym-order: Cn -> C<n>, Cnv -> C<n>v, Cs, Ci.
+      3. --symmetry, in ridgerunner's spelling: Z/nZ or Cn -> C<n>, Cpv, RDp,
+         Ci, Cs. Ridgerunner's D2 is a single mirror and becomes Cs; cplanes is
+         refused.
+      4. Otherwise C1: the run used no symmetry, so neither does the polish.
+
+    The group is never a fallback. A group the run used that fails on a file is
+    a refused stage, never a reason to polish that file without symmetry.
+    --no-permute does not enter: the vertex maps find the component permutation
+    themselves. Raises ValueError (symmetry_maps.SymmetryMapError is one) when the
+    result does not parse.
+    """
+    order = getattr(args, "sym_order", None)
+    if getattr(args, "slp_group", None):
+        return _canonical_group(args.slp_group, order), "--slp-group"
+    if getattr(args, "sym_group", None):
+        tmpl = _SLP_FROM_SYM_GROUP.get(args.sym_group)
+        if tmpl is None:
+            raise ValueError(f"--sym-group {args.sym_group!r} has no SLP equivalent; "
+                             f"name the group with --slp-group")
+        if "{n}" in tmpl and order is None:
+            raise ValueError(f"--sym-group {args.sym_group} needs --sym-order")
+        return (_canonical_group(tmpl.format(n=order)),
+                f"--sym-group {args.sym_group}"
+                + (f" --sym-order {order}" if "{n}" in tmpl else ""))
+    if getattr(args, "symmetry", None):
+        s = args.symmetry.strip()
+        if s.lower() == "d2":
+            return "Cs", "--symmetry D2 (ridgerunner's D2 is a single mirror: Cs)"
+        if s.lower() == "cplanes":
+            raise ValueError("--symmetry cplanes has no SLP group; name the point group "
+                             "the run should keep with --slp-group (e.g. C2v)")
+        return _canonical_group(s, order), f"--symmetry {s}"
+    return "C1", "no --slp-group, --sym-group or --symmetry: the run used no symmetry"
+
+
+def _vec3(text: str, flag: str) -> list[float]:
+    try:
+        v = [float(t) for t in str(text).split(",")]
+    except ValueError:
+        v = []
+    if len(v) != 3 or not any(v):
+        raise ValueError(f"{flag} needs three comma-separated numbers, not all zero "
+                         f"(got {text!r})")
+    return v
+
+
+def slp_frame(args) -> tuple[list[float] | None, list[float] | None]:
+    """(axis, ref) for the polish, None meaning the canonical z and x."""
+    axis = _vec3(args.slp_axis, "--slp-axis") if getattr(args, "slp_axis", None) else None
+    ref = _vec3(args.slp_ref, "--slp-ref") if getattr(args, "slp_ref", None) else None
+    return axis, ref
+
+
+def slp_extra_args(args) -> list[str]:
+    """--slp-arg values, each split like a shell command line.
+
+    So one value can carry several flags (--slp-arg="--no-soc --tau-slack 2e-3"),
+    which is also what the GUI's single text field hands over."""
+    out: list[str] = []
+    for item in getattr(args, "slp_arg", None) or []:
+        out += shlex.split(item)
+    return out
+
+
+def slp_tool_options(tokens: list[str]) -> argparse.Namespace:
+    """The tool's own parse of the pass-through flags (placeholder input and group).
+
+    Run up front so a typo fails in seconds, not after an hours-long cycle. Raises
+    ValueError for a flag the tool rejects or one the stage sets itself (see
+    _SLP_OWNED: that includes --elo, --ehi and --allow-edge-collapse, so the
+    collapse guard's floor cannot be moved from here), including an abbreviation
+    argparse would expand to one."""
+    ap = _slp_tool().build_parser()
+    # Two placeholder command lines that differ in every owned option with a
+    # value. An option the tokens set comes out the same under both, whatever
+    # value they gave it (including the placeholder's own); a flag the tokens
+    # set differs from its default.
+    base_a = ["input.xyz", "-o", "a.xyz", "--group", "C1", "--order", "1", "--axis=0,0,1",
+              "--ref=1,0,0", "--max-minutes", "1", "--passes", "1", "--resample-vu", "0",
+              "--elo", "0.8", "--ehi", "1.25"]
+    base_b = ["input.xyz", "-o", "b.xyz", "--group", "Cs", "--order", "2", "--axis=0,1,0",
+              "--ref=0,0,1", "--max-minutes", "2", "--passes", "2", "--resample-vu", "1",
+              "--elo", "0.7", "--ehi", "1.3"]
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            na = ap.parse_args(base_a + list(tokens))
+            nb = ap.parse_args(base_b + list(tokens))
+    except SystemExit:
+        lines = err.getvalue().strip().splitlines()
+        raise ValueError(f"--slp-arg {shlex.join(tokens)} is not valid for slp_tighten.py: "
+                         f"{lines[-1] if lines else 'parse error'}") from None
+    clash = []
+    for dest, use in _SLP_OWNED.items():
+        if isinstance(ap.get_default(dest), bool):
+            hit = getattr(na, dest) != ap.get_default(dest)
+        else:
+            hit = getattr(na, dest) == getattr(nb, dest)
+        if hit:
+            clash.append(f"{dest.replace('_', '-')} (use {use})")
+    if clash:
+        raise ValueError("--slp-arg sets what the stage sets itself: " + ", ".join(clash))
+    return na
+
+
+def parse_slp_result(text: str) -> dict[str, str] | None:
+    """The key=value fields of the tool's last 'SLP RESULT' line, or None."""
+    line = None
+    for ln in text.splitlines():
+        if ln.startswith("SLP RESULT "):
+            line = ln
+    if line is None:
+        return None
+    try:
+        toks = shlex.split(line[len("SLP RESULT "):])
+    except ValueError:
+        return None
+    out = {}
+    for t in toks:
+        k, sep, v = t.partition("=")
+        if sep:
+            out[k] = v
+    return out
+
+
+def _as_float(v) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def strict_symmetry_check(path: Path, spec: str, axis=None, ref=None,
+                          tol: float = 1e-6) -> tuple[bool, str]:
+    """Strict symmetry_maps.vertex_maps on a file, centred on its vertex mean first.
+
+    Centring is safe both ways: the mean of a vertex set symmetric about the origin
+    is fixed by the group, so subtracting it keeps the symmetry; and a file that is
+    symmetric about an off-origin centre is symmetric about the origin once centred."""
+    sm = _symmetry_maps()
+    comps = [np.asarray(c, float) for c in read_xyz(path)]
+    c0 = np.vstack(comps).mean(axis=0)
+    comps = [c - c0 for c in comps]
+    try:
+        mats, perms = sm.vertex_maps(comps, spec, axis=axis, ref=ref, tol=tol)
+    except sm.SymmetryMapError as exc:
+        return False, str(exc)
+    err = sm.symmetry_error(np.vstack(comps), mats, perms)
+    return True, f"exact {spec} (|G| {len(mats)}, error {err:.1e})"
+
+
+def edge_floor_ratio(floor_src: Path, dst: Path, elo: float, tau_src: float,
+                     tau_out: float) -> tuple[float, str]:
+    """The cycle's own collapse guard on the file as written: over components, the
+    smallest ratio of the shortest output edge to its floor.
+
+    `floor_src` is the polygon the LP of the best pass ran on, the tool's
+    OUT_pass{k}_input.xyz (slp_floor_source). For pass 1 that is the source itself,
+    projected if it had to be; after a resample, or in a later pass, the source's
+    edges are no longer the LP's bound. The floor is the LP's own lower bound,
+    min(elo x mean edge, shortest edge) of each component of
+    `floor_src`, scaled by tau_out/tau_src because the tool rescales its output to
+    tau 0.49997. A floor file whose vertex counts differ from the output's gives NaN,
+    which rule 6 rejects. The failure this guards (an edge collapsing to 1/125 of its
+    neighbours with HOMFLY still SAME) reads far below 1."""
+    a = [np.asarray(c, float) for c in read_xyz(floor_src)]
+    b = [np.asarray(c, float) for c in read_xyz(dst)]
+
+    def edges(c):
+        return np.linalg.norm(np.roll(c, -1, axis=0) - c, axis=1)
+
+    if [len(c) for c in a] != [len(c) for c in b]:
+        return math.nan, (f"{floor_src.name} has vertex counts {[len(c) for c in a]}, the output "
+                          f"{[len(c) for c in b]}: no floor to read")
+    worst = math.inf
+    for ca, cb in zip(a, b):
+        ea, eb = edges(ca), edges(cb)
+        floor = min(elo * ea.mean(), ea.min()) * (tau_out / tau_src)
+        worst = min(worst, float(eb.min() / floor))
+    return worst, f"against the edge floor of {floor_src.name}"
+
+
+def slp_floor_source(dst: Path, result: dict) -> Path | None:
+    """The polygon the best pass's LP ran on: the tool's OUT_pass{k}_input.xyz for
+    k = best_pass (written for every pass, after any projection or resample), or None
+    when the tool did not leave it."""
+    k = result.get("best_pass")
+    if not k:
+        return None
+    p = dst.parent / f"{dst.stem}_pass{k}_input.xyz"
+    return p if p.is_file() else None
+
+
+def _finite(v) -> bool:
+    return v is not None and math.isfinite(v)
+
+
+def slp_accept(code: int | None, result: dict, verdict: str, m_in: Measurement,
+               m_out: Measurement | None, sym_ok: bool, sym_msg: str,
+               floor: tuple[float, str] | None, min_gain: float
+               ) -> tuple[bool, list[str], list[str]]:
+    """Decide whether an SLP output may replace the best: (ok, failures, notes).
+
+    Every condition must hold:
+      1. the tool exited 0 and its SLP RESULT line says status=ok;
+      2. HOMFLY SAME against the cycle's reference. UNKNOWN is NOT enough, unlike
+         the round gates, which only stop on DIFFERENT: a polish is optional, so
+         an unverified one is simply not taken;
+      3. ropelength fell by MORE than --slp-min-gain;
+      4. tau is normalised and above 0.4995, so the struts and residual reported
+         for it mean what they mean for a ridgerunner output;
+      5. the output is exactly symmetric (strict vertex maps, 1e-6 mean edges);
+      6. no collapsed edge. Without edge bounds the SLP once collapsed an edge to
+         1/125 of its neighbours and HOMFLY still said SAME. Checked twice: the
+         tool's min_edge_frac (shortest edge over the floor of the pass the LP ran
+         on) must be >= 1 - 1e-6, and the cycle's own reading on the file as
+         written (edge_floor_ratio, against the tool's OUT_pass{k}_input.xyz of the
+         best pass) must be >= 1 - 1e-3, the slack covering the output's rescale.
+         The bounds themselves are stage-owned (--elo/--ehi/--allow-edge-collapse
+         cannot be passed through --slp-arg);
+      7. the projection onto exact symmetry, if one was needed, cost <= 0.05.
+    Rules 6 and 7 need finite readings: NaN fails them.
+    Recorded but not gated: struts, residual, minRad/tau, N, accepted/trials,
+    cert_rejects, edge_ratio (above 1.15 a note says to redistribute).
+    minRad/tau >= 1 is not a rule: tau = min(minRad, minStrut/2) makes it always hold.
+    """
+    fails: list[str] = []
+    notes: list[str] = []
+    if code != 0 or result.get("status") != "ok":
+        reason = result.get("reason") or result.get("status") or "no SLP RESULT line"
+        return False, [f"slp_tighten.py exited {code} ({reason})"], notes
+    if m_out is None:
+        return False, ["the output could not be measured"], notes
+    if verdict != "SAME":
+        fails.append(f"HOMFLY {verdict}, not SAME (UNKNOWN is not enough for a polish)")
+    gain = m_in.rop - m_out.rop
+    if not gain > min_gain:
+        fails.append(f"gain {gain:+.4f} is not more than --slp-min-gain {min_gain}")
+    if not (is_normalised(m_out.tau) and m_out.tau > SLP_TAU_FLOOR):
+        fails.append(f"tau {m_out.tau:.6f} is outside the normalised window "
+                     f"(|tau - 0.5| <= {NOMINAL_WINDOW:g} and > {SLP_TAU_FLOOR})")
+    if not sym_ok:
+        fails.append(f"output not exactly symmetric: {sym_msg}")
+    # Rules 6 and 7 pass only on a FINITE reading inside the bound: a NaN (0/0 on a
+    # zero-length edge, say) compares False both ways and must not slip through.
+    mef = _as_float(result.get("min_edge_frac"))
+    if not (_finite(mef) and mef >= 1 - 1e-6):
+        fails.append(f"collapse guard: the tool's min_edge_frac is {result.get('min_edge_frac')} "
+                     f"(needs a finite value >= 1)")
+    fr = floor[0] if floor else None
+    if not (_finite(fr) and fr >= 1 - 1e-3):
+        fails.append("collapse guard: shortest edge at "
+                     + (f"{fr:.4f} of its floor ({floor[1]})" if (floor and fr is not None) else "unknown")
+                     + " (needs a finite value >= 0.999)")
+    pc = _as_float(result.get("projection_cost"))
+    if not (_finite(pc) and pc <= SLP_MAX_PROJECTION):
+        fails.append(f"projection cost {result.get('projection_cost')} is not a finite value "
+                     f"<= {SLP_MAX_PROJECTION}")
+    er = _as_float(result.get("edge_ratio"))
+    if er is not None and er > 1.15:
+        notes.append(f"edge ratio {er:.3f} > 1.15: redistribute before the next ridgerunner leg")
+    return not fails, fails, notes
+
+
+@dataclass
+class SlpOutcome:
+    """What one SLP stage did. `out` is the tool's output (a scratch path) when
+    it wrote one; only an accepted one is ever copied into results/."""
+    ok: bool
+    why: str
+    out: Path | None
+    m_in: Measurement
+    m_out: Measurement | None = None
+    verdict: str = "-"
+    result: dict = field(default_factory=dict)
+    code: int | None = None
+
+
+def _slp_failure_line(text: str) -> str:
+    for ln in reversed(text.splitlines()):
+        if ln.startswith(("refused:", "error:")):
+            return ln.strip()
+    for ln in reversed(text.splitlines()):
+        if ln.strip() and not ln.startswith("SLP RESULT"):
+            return ln.strip()
+    return ""
+
+
+def slp_polish(src: Path, dst: Path, args, ref_generic: Path, scratch: Path, log: Path,
+               m_in: Measurement | None = None) -> SlpOutcome:
+    """Run tighten_lib/slp_tighten.py on `src`, then measure, gate and judge its output.
+
+    Mirrors maybe_refine: one subprocess, then everything that decides the result
+    happens here, against this cycle's own reference (slp_accept). The tool's
+    stdout and stderr go to `log`, a FILE and never a pipe, for the reason
+    descend_auto gives. `dst` is a scratch path: the caller copies an accepted
+    output into results/, so a rejected one (a changed link, say, with a lower
+    ropelength) can never be picked up as the best by --resume's scan.
+    """
+    spec, _ = slp_group(args)
+    axis, ref = slp_frame(args)
+    extra = slp_extra_args(args)
+    opts = slp_tool_options(extra)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    dst.unlink(missing_ok=True)          # never judge an earlier attempt's output
+    for stale in dst.parent.glob(f"{dst.stem}_pass*_input.xyz"):
+        stale.unlink()                   # nor read an earlier attempt's edge floor
+    if m_in is None:
+        m_in = measure(src)
+    cmd = [sys.executable, SLP_TOOL, src, "-o", dst, "--group", spec]
+    if axis is not None:
+        cmd.append(f"--axis={args.slp_axis}")      # = form: a leading '-' is not an option
+    if ref is not None:
+        cmd.append(f"--ref={args.slp_ref}")
+    cmd += ["--max-minutes", args.slp_minutes, "--passes", args.slp_passes]
+    if args.slp_resample_vu > 0:
+        cmd += ["--resample-vu", args.slp_resample_vu]
+    cmd = [str(c) for c in cmd] + extra
+    limit = 120 * args.slp_minutes + 1800          # the tool's budget, doubled, plus slack
+    with log.open("w") as sink:
+        sink.write("$ " + shlex.join(cmd) + "\n")
+        sink.flush()
+        try:
+            code = subprocess.run(cmd, stdout=sink, stderr=subprocess.STDOUT, text=True,
+                                  cwd=scratch, timeout=limit).returncode
+        except subprocess.TimeoutExpired:
+            code = None
+    text = log.read_text(errors="replace")
+    result = parse_slp_result(text) or {}
+    if code is None:
+        return SlpOutcome(False, f"slp_tighten.py did not finish in {limit:.0f} s and was "
+                                 f"killed", None, m_in, result=result)
+    if code != 0 or result.get("status") != "ok" or not dst.is_file():
+        reason = result.get("reason") or result.get("status") or "no SLP RESULT line"
+        if code == 0 and result.get("status") == "ok":
+            reason = "reported ok but wrote no output"
+        fail = _slp_failure_line(text)
+        return SlpOutcome(False, f"slp_tighten.py exited {code} ({reason})"
+                                 + (f": {fail}" if fail else ""),
+                          dst if dst.is_file() else None, m_in, result=result, code=code)
+
+    sym_ok, sym_msg = strict_symmetry_check(dst, spec, axis, ref)
+    m_out = measure(dst)
+    verdict = homfly_verdict(ref_generic, dst, scratch)
+    fsrc = slp_floor_source(dst, result)
+    if fsrc is None:
+        floor = (math.nan, f"the tool left no {dst.stem}_pass{result.get('best_pass')}_input.xyz "
+                           "to read the floor from")
+    else:
+        floor = edge_floor_ratio(fsrc, dst, opts.elo, measure(fsrc, want_struts=False).tau,
+                                 m_out.tau)
+    ok, fails, notes = slp_accept(code, result, verdict, m_in, m_out, sym_ok, sym_msg,
+                                  floor, args.slp_min_gain)
+    head = (f"SLP {m_in.rop:.3f} -> {m_out.rop:.3f} ({m_in.rop - m_out.rop:+.3f}), "
+            f"HOMFLY {verdict}")
+    if ok:
+        why = head + "; accepted; link-gated; diagram not checked"
+    else:
+        why = head + "; rejected: " + "; ".join(fails)
+    if notes:
+        why += "; " + "; ".join(notes)
+    return SlpOutcome(ok, why, dst, m_in, m_out, verdict, result, code)
+
+
+def report_slp(o: SlpOutcome, log: Path) -> None:
+    """Print one stage's outcome in the cycle's own layout."""
+    r = o.result
+    if r.get("status") == "ok":
+        print(f"  tool    rop {r.get('rop_in')} -> {r.get('rop_out')} in {r.get('wall_s')} s; "
+              f"{r.get('accepted')} accepted / {r.get('trials')} trials, cert_rejects "
+              f"{r.get('cert_rejects')}, N {r.get('N_in')} -> {r.get('N_out')}, edge ratio "
+              f"{r.get('edge_ratio')}, min_edge_frac {r.get('min_edge_frac')}")
+    if o.m_out is not None:
+        m = o.m_out
+        print(f"  output  rop {m.rop:.4f}  tau {m.tau:.6f}  minRad/tau {m.minrad_over_tau:.3f}  "
+              f"struts {m.struts}  residual {fmt(m.residual, '.4f')}  HOMFLY {o.verdict}")
+    print(f"  {'ACCEPTED' if o.ok else 'REJECTED'}: {o.why}")
+    if not o.ok:
+        print(f"  log: {log}")
+
+
+def slp_plateau_fires(args, m: Measurement) -> tuple[bool, str]:
+    """--slp plateau's trigger: a --symmetry run whose descent ended far from
+    critical (residual above --slp-trigger-residual) on a healthy contact set."""
+    if not args.symmetry:
+        return False, "not a --symmetry run"
+    if m.residual is None:
+        return False, f"residual unavailable (tau {m.tau:.6f} is off the nominal 0.5)"
+    if m.residual <= args.slp_trigger_residual:
+        return False, (f"residual {m.residual:.4f} <= --slp-trigger-residual "
+                       f"{args.slp_trigger_residual}")
+    if (m.struts or 0) <= SLP_MIN_STRUTS:
+        return False, f"{m.struts} struts <= {SLP_MIN_STRUTS}"
+    return True, (f"residual {m.residual:.4f} > {args.slp_trigger_residual} with "
+                  f"{m.struts} struts")
+
+
+def slp_plan(args) -> list[str]:
+    """The stage plan, for the run header and --dry-run."""
+    spec, rule = slp_group(args)
+    axis, ref = slp_frame(args)
+    extra = slp_extra_args(args)
+    if args.slp == "final":
+        when = "once, after the last round, on the best file that is not a raw contraction"
+    else:
+        when = (f"after any round whose descent ends at residual > "
+                f"{args.slp_trigger_residual} with > {SLP_MIN_STRUTS} struts (needs "
+                f"--symmetry); the next round continues from the "
+                + ("SLP output (--slp-carry)" if args.slp_carry else "descended file"))
+    frame = ("canonical frame (axis z, ref x)" if axis is None and ref is None else
+             f"axis {args.slp_axis or '0,0,1'}, ref {args.slp_ref or '1,0,0'}")
+    return [
+        f"SLP polish    --slp {args.slp}: {when}",
+        f"              group {spec} ({rule}), {frame}",
+        f"              budget {args.slp_minutes:g} min, {args.slp_passes} pass(es), "
+        + (f"resample to v/u {args.slp_resample_vu:g} between passes"
+           if args.slp_resample_vu > 0 else "no resample")
+        + (f"; extra flags {shlex.join(extra)}" if extra else ""),
+        f"              kept only on HOMFLY SAME, gain > {args.slp_min_gain}, normalised "
+        f"tau > {SLP_TAU_FLOOR}, exact {spec}, no collapsed edge, projection <= "
+        f"{SLP_MAX_PROJECTION}",
+    ]
+
+
+def slp_dry_run(src: Path, args, scratch: Path) -> list[str]:
+    """slp_tighten.py --dry-run on `src`: does the group hold, and how big is the
+    subspace. Informational: the stage itself runs on a later file."""
+    spec, _ = slp_group(args)
+    cmd = [sys.executable, SLP_TOOL, src, "--group", spec, "--dry-run",
+           "--max-minutes", args.slp_minutes, "--passes", args.slp_passes]
+    if args.slp_axis:
+        cmd.append(f"--axis={args.slp_axis}")
+    if args.slp_ref:
+        cmd.append(f"--ref={args.slp_ref}")
+    out = _run(cmd, cwd=scratch)
+    keep = [ln.strip() for ln in out.splitlines()
+            if ln.startswith(("group ", "plan:", "refused:", "error:"))]
+    return keep or [out.strip().splitlines()[-1] if out.strip() else "no output"]
+
+
+def slp_preflight(args) -> tuple[str | None, list[str]]:
+    """main()'s checks for --slp: (error or None, warnings). Exit 2 on an error."""
+    if not SLP_TOOL.is_file():
+        return f"--slp {args.slp} needs {SLP_TOOL}", []
+    try:
+        from scipy.optimize import linprog
+        res = linprog([1.0], bounds=[(0.0, 1.0)], method="highs")
+        if res.status != 0:
+            raise ValueError(res.message)
+    except (ImportError, ValueError, TypeError) as exc:
+        return f"--slp needs scipy >= 1.6, whose linprog takes method='highs' ({exc})", []
+    if args.slp_minutes <= 0 or args.slp_passes < 1:
+        return "--slp-minutes must be > 0 and --slp-passes >= 1", []
+    if args.slp_resample_vu < 0 or args.slp_min_gain < 0 or args.slp_trigger_residual < 0:
+        return ("--slp-resample-vu, --slp-min-gain and --slp-trigger-residual must be >= 0 "
+                "(a negative --slp-min-gain would accept a polish that lost length)"), []
+    try:
+        spec, _ = slp_group(args)
+        sm = _symmetry_maps()
+        sm.parse_spec(spec)
+        axis, ref = slp_frame(args)
+        sm.generators(spec, axis, ref)     # e.g. a --slp-ref parallel to the axis
+        slp_tool_options(slp_extra_args(args))
+    except (ImportError, ValueError) as exc:
+        return f"--slp {args.slp}: {exc}", []
+    warn = []
+    if args.slp == "plateau" and not args.symmetry:
+        warn.append("--slp plateau fires only on a --symmetry run, and this run has none; "
+                    "the stage will never run (use --slp final)")
+    if args.slp_carry and args.slp != "plateau":
+        warn.append("--slp-carry only acts under --slp plateau; ignored")
+    if args.slp_resample_vu > 0 and args.slp_passes < 2:
+        warn.append("--slp-resample-vu acts between passes, so with --slp-passes 1 it "
+                    "does nothing; the 8BL recipe is --slp-passes 2 --slp-resample-vu 6")
+    return None, warn
+
+
+def final_slp_done(work: Path, results: Path) -> bool:
+    """Has this work dir's --slp final stage already run (kept or not)?
+
+    An accepted stage leaves results/final_slp.xyz; every finished stage leaves
+    a move=slp row in the ledger, which is written right after it."""
+    if (results / "final_slp.xyz").is_file():
+        return True
+    ledger = work / "ledger.csv"
+    if not ledger.is_file():
+        return False
+    with ledger.open(newline="") as fh:
+        return any(row.get("move") == "slp" for row in csv.DictReader(fh))
+
+
+# --------------------------------------------------------------------------- #
 # the cycle
 # --------------------------------------------------------------------------- #
 
@@ -1206,6 +1791,9 @@ class Round:
     sym_dev: float | None = None
     note: str = ""
     kept: str = ""
+    # kept last: a ledger written before it existed still loads (resume_state
+    # sets only the columns a row has)
+    rop_slp: float | None = None
 
 
 def fmt(v, spec="8.3f"):
@@ -1229,15 +1817,24 @@ class Resumed:
     rounds: list
 
 
-def round_output(results: Path, i: int) -> Path | None:
+def round_output(results: Path, i: int, carry_slp: bool = False) -> Path | None:
     """The file round i carried forward, or None if it never finished.
 
     A round can end on any of three files depending on which options were in
     play, and they are produced in this order, so the most derived one that
     exists is the one that became the next round's input.
+
+    Under --slp-carry an accepted plateau polish, round{i}_slp.xyz, is what the
+    round carried, ahead of the descended file it was polished from; only a
+    refinement (which, under --slp-carry, refines that polish) is more derived.
+    Without --slp-carry the next round continued from the descended file, so the
+    polish is a best candidate (resume_state scans it) but never an output.
     """
-    for pat in (f"round{i}_refined_vu*_sym.xyz", f"round{i}_refined_vu*.xyz",
-                f"round{i}_descended_sym.xyz", f"round{i}_descended.xyz"):
+    pats = [f"round{i}_refined_vu*_sym.xyz", f"round{i}_refined_vu*.xyz"]
+    if carry_slp:
+        pats.append(f"round{i}_slp.xyz")
+    pats += [f"round{i}_descended_sym.xyz", f"round{i}_descended.xyz"]
+    for pat in pats:
         hits = sorted(results.glob(pat))
         if hits:
             return hits[-1]
@@ -1278,8 +1875,11 @@ def resume_state(work: Path, results: Path, args) -> Resumed:
             f"at a directory an earlier cycle actually wrote, or drop --resume "
             f"to start a new cycle.")
 
+    # --slp-carry means something only under --slp plateau (main() warns otherwise)
+    carry = (bool(getattr(args, "slp_carry", False))
+             and getattr(args, "slp", "off") == "plateau")
     last = 0
-    while round_output(results, last + 1) is not None:
+    while round_output(results, last + 1, carry) is not None:
         last += 1
 
     # a round whose move landed but whose descent did not
@@ -1336,21 +1936,35 @@ def resume_state(work: Path, results: Path, args) -> Resumed:
     for i in range(1, last + 1):
         if i in have:
             continue
-        out = round_output(results, i)
+        out = round_output(results, i, carry)
         m = measure(out, want_struts=False)
-        rounds.append(Round(index=i, rop_descended=m.rop, kept=out.name,
-                            note="reconstructed on resume (no ledger row)"))
+        rd = Round(index=i, rop_descended=m.rop, kept=out.name,
+                   note="reconstructed on resume (no ledger row)")
+        slp = results / f"round{i}_slp.xyz"
+        if slp.is_file():
+            rd.rop_slp = measure(slp, want_struts=False).rop
+        rounds.append(rd)
     rounds.sort(key=lambda r: r.index)
 
-    # the running best, measured rather than trusted
+    # The running best, measured rather than trusted. An SLP polish counts: it
+    # is in results/ only if it was accepted (HOMFLY SAME and the rest of
+    # slp_accept), because slp_polish writes to a scratch path and the caller
+    # copies only an accepted output in.
     best_path, best_rop = origin, measure(origin, want_struts=False).rop
+    cands = []
     for i in range(1, last + 1):
-        out = round_output(results, i)
+        cands += [round_output(results, i, carry), results / f"round{i}_slp.xyz"]
+    cands.append(results / "final_slp.xyz")
+    seen: set[Path] = set()
+    for out in cands:
+        if out is None or out in seen or not out.is_file():
+            continue
+        seen.add(out)
         rop = measure(out, want_struts=False).rop
         if rop < best_rop:
             best_rop, best_path = rop, out
 
-    current = round_output(results, last) if last else origin
+    current = round_output(results, last, carry) if last else origin
     return Resumed(src=origin, origin=origin, current=current,
                    start_round=last + 1, best_rop=best_rop,
                    best_path=best_path, rounds=rounds)
@@ -1379,9 +1993,17 @@ def run_cycle(args) -> int:
         print(f"  cycle started at ropelength {mo.rop:.4f}; this invocation "
               f"resumes at {measure(current, want_struts=False).rop:.4f}")
         if resumed.start_round > args.rounds:
-            print(f"\nnothing to do: rounds 1..{args.rounds} are already complete. "
-                  f"Raise --rounds to continue.")
-            return 0
+            if args.slp == "final" and not final_slp_done(work, results):
+                # The rounds are done but the final polish never ran (it was not
+                # asked for, or the driver died during it). Skip the round loop,
+                # which is empty from here, and fall through to it after the
+                # reference polynomial has been rebuilt and checked below.
+                print(f"\nrounds 1..{args.rounds} are already complete; running the "
+                      f"pending --slp final stage")
+            else:
+                print(f"\nnothing to do: rounds 1..{args.rounds} are already complete. "
+                      f"Raise --rounds to continue.")
+                return 0
     else:
         src = Path(args.input).expanduser().resolve()
         current = results / "round0_input.xyz"
@@ -1453,6 +2075,21 @@ def run_cycle(args) -> int:
     else:
         best_rop, best_path = m0.rop, current
         rounds = []
+    # The best file that is NOT a raw contraction or squeeze: the input, a
+    # descent, a refinement or an accepted SLP polish. best_path can be a freshly
+    # contracted file, which is a valid configuration but unrelaxed and
+    # off-nominal, and the --slp final stage never polishes one of those. On a
+    # resume the two agree: resume_state's scan never looks at a contraction.
+    best_norm_rop, best_norm_path = best_rop, best_path
+
+    if args.slp != "off":
+        print()
+        print("\n".join(slp_plan(args)))
+        if args.dry_run:
+            print("  [dry run] the SLP stage will not run; slp_tighten.py --dry-run on "
+                  f"{Path(current).name} (the stage itself runs on a later file):")
+            for ln in slp_dry_run(Path(current), args, scratch):
+                print(f"    {ln}")
 
     # ------------------------------------------------------------------ #
     # Initial descent. The cycle STARTS with a contraction, and a contraction
@@ -1492,10 +2129,16 @@ def run_cycle(args) -> int:
         current = pre
         if m_pre.rop < best_rop:
             best_rop, best_path = m_pre.rop, pre
+        if m_pre.rop < best_norm_rop:
+            best_norm_rop, best_norm_path = m_pre.rop, pre
         current, rnote = maybe_refine(current, results, "round0", args,
                                       ref_generic, scratch)
         if rnote:
             print(f"  {rnote}")
+        if args.slp != "off" and current != pre:
+            m_r = measure(current, want_struts=False)
+            if m_r.rop < best_norm_rop:
+                best_norm_rop, best_norm_path = m_r.rop, current
 
     for i in range(resumed.start_round if resumed else 1, args.rounds + 1):
         rd = Round(index=i)
@@ -1687,8 +2330,37 @@ def run_cycle(args) -> int:
             rounds.append(rd)
             break
 
+        # --slp plateau: polish a symmetric round's descent when the Animation
+        # stepper left it far from critical. Its output is a best candidate; the
+        # next round still starts from the descended file unless --slp-carry,
+        # and rd.gain and the rollback below judge the DESCENT, not the polish.
+        slp_out = None
+        if args.slp == "plateau":
+            fire, why_fire = slp_plateau_fires(args, m_d)
+            if not fire:
+                print(f"  SLP plateau stage: not triggered ({why_fire})")
+            else:
+                slp_dir = work / f"run_round{i}"
+                slp_log = slp_dir / "slp.log"
+                print(f"  SLP plateau stage: {why_fire}; slp_tighten.py --group "
+                      f"{slp_group(args)[0]}, {args.slp_minutes:g} min, progress in {slp_log}")
+                o = slp_polish(descended, slp_dir / "slp" / f"round{i}_slp.xyz", args,
+                               ref_generic, scratch, slp_log, m_in=m_d)
+                report_slp(o, slp_log)
+                if o.ok:
+                    slp_out = results / f"round{i}_slp.xyz"
+                    shutil.copy(o.out, slp_out)
+                    rd.rop_slp = o.m_out.rop
+                    if o.m_out.rop < best_rop:
+                        best_rop, best_path = o.m_out.rop, slp_out
+                    if o.m_out.rop < best_norm_rop:
+                        best_norm_rop, best_norm_path = o.m_out.rop, slp_out
+                rd.note = (rd.note + "; " if rd.note else "") + o.why
+
         if m_d.rop < best_rop:
             best_rop, best_path = m_d.rop, descended
+        if m_d.rop < best_norm_rop:
+            best_norm_rop, best_norm_path = m_d.rop, descended
         rd.gain = (m_in.rop - m_d.rop)
 
         # A round that completes, keeps the link, and still ends ABOVE its own
@@ -1745,27 +2417,84 @@ def run_cycle(args) -> int:
 
         # Carry the RECONDITIONED file forward even when it is not the
         # shortest, when it earned that by improving the next move's gate.
-        current = descended
-        rd.kept = descended.name
+        # --slp-carry carries an accepted plateau polish instead.
+        current = slp_out if (args.slp_carry and slp_out is not None) else descended
+        rd.kept = Path(current).name
+        carried = current
         current, rnote = maybe_refine(current, results, f"round{i}", args,
                                       ref_generic, scratch)
         if rnote:
             rd.note = (rd.note + "; " if rd.note else "") + rnote
             rd.kept = Path(current).name
+        if args.slp != "off" and current != carried:
+            m_r = measure(current, want_struts=False)
+            if m_r.rop < best_norm_rop:
+                best_norm_rop, best_norm_path = m_r.rop, current
         rounds.append(rd)
+
+    # ------------------------------------------------------------ SLP final
+    # --slp final: one polish of the best file that is not a raw contraction,
+    # after the last round. It replaces the best only if slp_accept passes AND it
+    # beats the best, which can be a contracted file this stage never sees.
+    if args.slp == "final" and not args.dry_run:
+        src_slp = Path(best_norm_path or best_path)
+        slp_log = work / "slp_final.log"
+        print(f"\n{'=' * 72}\nfinal SLP polish: slp_tighten.py --group {slp_group(args)[0]}, "
+              f"{args.slp_minutes:g} min, {args.slp_passes} pass(es)\n{'=' * 72}")
+        m_src = measure(src_slp)
+        print(f"  source  {src_slp.name}  rop {m_src.rop:.4f}  minRad/tau "
+              f"{m_src.minrad_over_tau:.3f}  struts {m_src.struts}  residual "
+              f"{fmt(m_src.residual, '.4f')}")
+        print(f"  progress in {slp_log}")
+        o = slp_polish(src_slp, work / "slp_final" / "final_slp.xyz", args, ref_generic,
+                       scratch, slp_log, m_in=m_src)
+        report_slp(o, slp_log)
+        note = o.why
+        if o.ok:
+            keep = results / "final_slp.xyz"
+            shutil.copy(o.out, keep)
+            if o.m_out.rop < best_rop:
+                best_rop, best_path = o.m_out.rop, keep
+            else:
+                note += (f"; still above the best {best_rop:.4f} "
+                         f"({Path(best_path).name}), which stays")
+                print(f"  kept as {keep.name}, but the best ({Path(best_path).name}, "
+                      f"{best_rop:.4f}) is lower and stays")
+        m_s = o.m_out
+        rounds.append(Round(
+            index=max((r.index for r in rounds), default=0) + 1, move="slp",
+            rop_contracted=m_src.rop,
+            rop_descended=m_s.rop if m_s else None,
+            gain=(m_src.rop - m_s.rop) if m_s else None,
+            homfly=o.verdict,
+            struts=m_s.struts if m_s else None,
+            residual=m_s.residual if m_s else None,
+            minrad_over_tau=m_s.minrad_over_tau if m_s else None,
+            note=note, kept=Path(best_path).name,
+            rop_slp=m_s.rop if (m_s and o.ok) else None))
 
     # ---------------------------------------------------------------- report
     print(f"\n{'=' * 72}\nsummary\n{'=' * 72}")
+    # the slp column appears only when a polish was kept, so a run without one
+    # prints exactly the table it always did
+    show_slp = any(r.rop_slp is not None for r in rounds)
     hdr = (f"{'rd':>3} {'move':>8} {'f':>6} {'contracted':>11} {'descended':>10} "
-           f"{'gained':>7} {'struts':>7} {'resid':>7} {'mr/tau':>7} {'HOMFLY':>8}  note")
+           f"{'gained':>7} " + (f"{'slp':>10} " if show_slp else "")
+           + f"{'struts':>7} {'resid':>7} {'mr/tau':>7} {'HOMFLY':>8}  note")
     print(hdr)
     for r in rounds:
         print(f"{r.index:3d} {r.move[:8]:>8} {fmt(r.factor, '6.3f')} {fmt(r.rop_contracted, '11.3f')} "
               f"{fmt(r.rop_descended, '10.3f')} {fmt(r.gain, '+7.3f')} "
-              f"{'-' if r.struts is None else r.struts:>7} {fmt(r.residual, '7.4f')} "
+              + (f"{fmt(r.rop_slp, '10.3f')} " if show_slp else "")
+              + f"{'-' if r.struts is None else r.struts:>7} {fmt(r.residual, '7.4f')} "
               f"{fmt(r.minrad_over_tau, '7.3f')} {r.homfly:>8}  {r.note}")
     print("  'gained' is how much ropelength the round REMOVED: positive is an "
           "improvement,\n  negative means the round ended above where it started.")
+    if show_slp or any(r.move == "slp" for r in rounds):
+        print("  'slp' is the ropelength of a KEPT SLP polish. On a move=slp row "
+              "'contracted' is the\n  file it polished and 'descended' its output. "
+              "Link-gated (HOMFLY); the diagram may change --\n  check with a "
+              "diagram-isomorphism tool before quoting a per-diagram minimum.")
     print(f"\nstart {m0.rop:.4f}  ->  best {best_rop:.4f}  "
           f"({(best_rop - m0.rop) / m0.rop * 100:+.2f}%)")
     print(f"best configuration: {best_path}")
@@ -2033,6 +2762,94 @@ def build_parser() -> argparse.ArgumentParser:
                     help="factors swept by the squeeze scan; the HARDEST "
                          "admissible one is taken")
 
+    sl = p.add_argument_group(
+        "SLP polish (feasible-direction LP; tighten_lib/slp_tighten.py)",
+        "An opt-in stage, not a third move. Under --symmetry the patched ridgerunner "
+        "is forced onto the Animation stepper, and a symmetric run can park well "
+        "above residual 0.1 (8BL RD2 legs 0.31-0.43, 7BL C7 0.322, lark C5 0.263), "
+        "a floor that belonged to the stepper, not to the configuration; not always "
+        "(4BL_wider under C2v stopped on residual 0.0146). The equivariant "
+        "sequential LP moves every vertex inside the exact symmetry subspace, under "
+        "linearised contact, minRad and edge-length constraints, and accepts a step "
+        "only on an octrope decrease plus a PL isotopy certificate. On 8BL D2d the "
+        "recipe below reaches 291.745 (the hand-run chain: 298.242 -> 291.748, after "
+        "every geometric move had returned nothing). Its "
+        "output replaces the best only on HOMFLY SAME, a gain of more than "
+        "--slp-min-gain, a "
+        "normalised tau, exact symmetry and no collapsed edge. It is LINK-gated: the "
+        "diagram may change, so check a per-diagram minimum with a "
+        "diagram-isomorphism tool before quoting it. Below a residual of about 0.1 it "
+        "buys little; there the --no-eq default-stepper polish is the tool.")
+    sl.add_argument("--slp", choices=("off", "final", "plateau"), default="off",
+                    help="which SLP stage runs (default off). 'final' (recommended): "
+                         "once, after the last round, on the best file that is not a "
+                         "raw contraction; it also runs on --resume when the rounds "
+                         "are complete and it has not run yet. 'plateau': instead, "
+                         "after any round of a --symmetry run whose descent ends at "
+                         "residual > --slp-trigger-residual with more than 200 "
+                         "struts (not after the initial descent, and no final "
+                         "polish); the next round still continues from the "
+                         "descended file unless --slp-carry")
+    sl.add_argument("--slp-group", default=None,
+                    help="symmetry group for the polish: C1, Cs, Ci, C<n>, C<n>v, "
+                         "C<n>h, RD<n>, D<n>d[:xy|:diag], S<2n>. Default: derived "
+                         "from the run, first match wins -- --sym-group with "
+                         "--sym-order (Cn -> C<n>, Cnv -> C<n>v, Cs, Ci), else "
+                         "--symmetry (Z/nZ -> C<n>, Cpv, RDp, Ci, Cs; ridgerunner's "
+                         "D2 is a single mirror, so Cs; cplanes is refused), else C1 "
+                         "because the run used no symmetry. Never a fallback: a group "
+                         "that fails on the file refuses the stage. "
+                         "'tighten_lib/slp_tighten.py FILE --group detect' lists which "
+                         "of its 38 candidate groups the file has exactly, in the "
+                         "canonical frame (axis z, reference x)")
+    sl.add_argument("--slp-axis", default=None,
+                    help="principal axis X,Y,Z of the group (default 0,0,1). Not "
+                         "--sym-axis: symmetrize_link_xyz.py rotates the axis it is "
+                         "given onto z and the descent passes ridgerunner no "
+                         "--SymmetryAxis, so every symmetric file this cycle produces "
+                         "has its axis on z. Write --slp-axis=-1,0,0 for a leading "
+                         "minus")
+    sl.add_argument("--slp-ref", default=None,
+                    help="reference direction X,Y,Z (default 1,0,0): the first "
+                         "mirror normal of C<n>v / D<n>d or the first 2-fold axis of "
+                         "RD<n>, where symmetrize_link_xyz.py --group Cnv and "
+                         "ridgerunner's --SymmetryRef default put it")
+    sl.add_argument("--slp-minutes", type=float, default=15.0,
+                    help="wall budget for each SLP stage call (default 15). The 8BL "
+                         "recipe (--slp-passes 2 --slp-resample-vu 6) took about 10 "
+                         "minutes")
+    sl.add_argument("--slp-passes", type=int, default=1,
+                    help="passes per stage call; the budget is split between them "
+                         "(default 1)")
+    sl.add_argument("--slp-resample-vu", type=float, default=0.0,
+                    help="equivariant resample to this many vertices per unit "
+                         "ropelength between passes, certified as an isotopy "
+                         "(default 0 = off). The 8BL recipe, --slp-passes 2 "
+                         "--slp-resample-vu 6, reaches 291.745 (the hand-run chain: "
+                         "291.748)")
+    sl.add_argument("--slp-min-gain", type=float, default=0.05,
+                    help="keep a polish only if it removes more ropelength than this "
+                         "(default 0.05, finish_leg.sh's threshold)")
+    sl.add_argument("--slp-trigger-residual", type=float, default=0.1,
+                    help="--slp plateau only: fire when the round's descent ends with "
+                         "residual above this (default 0.1). The residual is read at "
+                         "the nominal radius on a normalised file; off-nominal it is "
+                         "unavailable and the stage does not fire")
+    sl.add_argument("--slp-carry", action="store_true",
+                    help="--slp plateau only: carry an accepted polish into the next "
+                         "round instead of the descended file. Off by default: on 8BL "
+                         "D2d every ridgerunner restart cost an immediate +0.36 to "
+                         "+0.38 that took 13.7k-16.3k steps to win back")
+    sl.add_argument("--slp-arg", action="append", default=[],
+                    help="extra slp_tighten.py flags, repeatable; each value is split "
+                         "like a shell line: --slp-arg='--no-soc --tau-slack 2e-3'. "
+                         "Checked against the tool's parser before the cycle starts. "
+                         "The flags the stage sets (-o, --group, --axis, --ref, "
+                         "--max-minutes, --passes, --resample-vu, --diagnose, "
+                         "--dry-run) are refused: use the --slp-* options. So are "
+                         "--elo, --ehi and --allow-edge-collapse: the collapse guard "
+                         "is measured against the default 0.8/1.25 bounds")
+
     o = p.add_argument_group("other")
     o.add_argument("--rr-arg", action="append", default=[],
                    help="extra ridgerunner flag, repeatable, without the leading dashes "
@@ -2119,6 +2936,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.sym_group and not args.sym_order:
         print("error: --sym-group needs --sym-order", file=sys.stderr)
         return 2
+    if args.slp != "off":
+        err, warnings = slp_preflight(args)
+        if err:
+            print(f"error: {err}", file=sys.stderr)
+            return 2
+        for w in warnings:
+            print(f"warning: {w}", file=sys.stderr)
     for binary in ("ropelength", "struts", "residual"):
         if shutil.which(binary) is None:
             print(f"error: {binary} not on PATH (octrope/ridgerunner not installed?)",
