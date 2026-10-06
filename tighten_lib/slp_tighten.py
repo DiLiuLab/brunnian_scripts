@@ -862,11 +862,18 @@ def _floats(text):
         raise argparse.ArgumentTypeError(f"expected a comma list of numbers, got {text!r}")
 
 
+def _userpath(s: str) -> Path:
+    """argparse type: a path with ~ expanded, so a typed ~/... means the home folder, not ./~/..."""
+    return Path(s).expanduser()
+
+
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("input", type=Path, help="tightened .xyz link")
-    ap.add_argument("-o", "--output", type=Path, help="output .xyz (required unless --diagnose, --dry-run "
+    ap.add_argument("input", type=_userpath, help="tightened .xyz link")
+    ap.add_argument("-o", "--output", type=_userpath, help="output .xyz (required unless --diagnose, --dry-run "
                     "or --group detect)")
+    ap.add_argument("--gui", action="store_true",
+                    help="open the parameter window (also what running with no arguments does)")
     g = ap.add_argument_group("symmetry")
     g.add_argument("--group", required=True, help="C1|none, Cs, Ci, C<n>, Z/<n>Z, C<n>v, C<n>h, RD<n>, "
                    "D<n> (n>=3), D<n>d[:xy|:diag], S<2n>, or detect (list which of 38 candidate "
@@ -896,8 +903,8 @@ def build_parser():
                    help="stop a pass when the window gained less ropelength than this (5e-4)")
     r.add_argument("--save-every", type=int, default=100, help="write OUT_cur.xyz every N accepts (100)")
     r.add_argument("--final-tau", type=float, default=0.49997, help="rescale the output to this tau")
-    r.add_argument("--work-dir", type=Path, default=None, help="scratch directory (default: a temp dir)")
-    r.add_argument("--gate-ref", type=Path, default=None,
+    r.add_argument("--work-dir", type=_userpath, default=None, help="scratch directory (default: a temp dir)")
+    r.add_argument("--gate-ref", type=_userpath, default=None,
                    help="HOMFLY-gate the output against this file in the cycle's generic frame (exit 4 "
                         "unless SAME)")
     r.add_argument("--diagnose", action="store_true", help="print the first-order feasible cone and exit")
@@ -923,9 +930,88 @@ def _result(fields: dict, note=True) -> str:
     return "SLP RESULT " + " ".join(f"{k}={v}" for k, v in fields.items()) + (" " + NOTE if note else "")
 
 
+GUI_BLURB = ("The SLP polish finishes a link that RidgeRunner has already tightened and on which "
+             "it has stopped improving (a plateau). Pick the tightened .xyz, choose the symmetry "
+             "group the run used (or first type detect in the group field and press 'Run now "
+             "(short jobs)' to list the exact groups), name the output, and set --gate-ref to the "
+             "cycle's reference (results/round0_input_sym.xyz; for a file not made by a cycle, the "
+             "input itself) so the topology is checked. Every field has a  ?  that explains it. "
+             "'Run now (short jobs)' runs only the quick modes (detect, --dry-run, --diagnose; "
+             "--diagnose can take up to a minute, and the window waits) and refuses a real run; "
+             "'Run in background' is for a real run (minutes), logged next to the output with "
+             ".xyz replaced by .log. Paths may start with ~. Do not hand the output back to "
+             "RidgeRunner.")
+
+GUI_EXAMPLES = {
+    "input": "~/tightening/my_link/cycle/BEST.xyz\n\nA TIGHTENED file at RidgeRunner scale "
+             "(thickness about 0.5) that is exactly symmetric under the group you choose. "
+             "A raw drawing is refused: tighten it first.",
+    "output": "~/tightening/my_link/slp/polished.xyz\n\nThe run log goes next to it, as "
+              "polished.log. Not needed for --group detect, --dry-run or --diagnose.",
+    "group": "detect   (press 'Run now' to list the groups that hold exactly)\n\nthen e.g. "
+             "C5 for a 5-loop link run under Z/5Z, D2d for the folded 8BL band, Ci, Cs, "
+             "C2v, or C1 for no symmetry.",
+    "gate_ref": "~/tightening/my_link/cycle/results/round0_input_sym.xyz\n\nThe cycle's own "
+                "reference (round0_input.xyz if the cycle did not symmetrize); for a file not made "
+                "by a cycle, the input itself. The output is HOMFLY-checked against it and the run "
+                "exits 4 if the link changed. It must not be the output file.",
+    "max_minutes": "15\n\nMost 15-minute one-pass runs on the project's links stopped on this "
+                   "budget while still descending; continue such a run from its output.",
+    "passes": "2 with --resample-vu 6: the 8BL D2d recipe, which reached 291.745 from 298.242.",
+    "resample_vu": "6\n\nResample between passes to this many vertices per unit ropelength "
+                   "(symmetric and certified). 0 = never.",
+    "robustness_vu": "4.5,6,8\n\nAfter the run, resample the output to each value and print "
+                     "the ropelength, as a check that the gain is not a polygon artefact. "
+                     "Compare with the INPUT resampled the same way.",
+}
+
+
+def _gui_log(app):
+    """Run in background: log next to the output file."""
+    out = app.value("output")
+    if not out:
+        return None, ("Set -o/--output for a real run: the log is written next to it. "
+                      "For --group detect, --dry-run or --diagnose use 'Run now' instead.")
+    out = Path(out).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    return out.with_suffix(".log"), None
+
+
+def _gui_quick(app):
+    """Run now is only for the modes that finish in seconds."""
+    if app.value("group").strip().lower() == "detect":
+        return True, None
+    flags = [r.dest for r in app.rows if r.is_flag and r.var.get()]
+    if "dry_run" in flags or "diagnose" in flags:
+        return True, None
+    return False, ("Run now is only for --group detect, --dry-run and --diagnose, which finish in "
+                   "seconds. A real run takes minutes: use Run in background, which logs next to "
+                   "the output and keeps going if you close the window.")
+
+
+def gui(parser) -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    try:
+        from tighten_gui import launch
+    except ImportError as exc:          # a Python built without Tk
+        print(f"error: no tkinter in this Python ({exc}); run with --help for the command line.",
+              file=sys.stderr)
+        return EXIT_USAGE
+    return launch(parser, Path(__file__).resolve(), blurb=GUI_BLURB, examples=GUI_EXAMPLES,
+                  browse={"input": "open", "output": "save", "gate_ref": "open", "work_dir": "dir"},
+                  log_for=_gui_log, quick_run=_gui_quick)
+
+
 def main(argv=None) -> int:
     ap = build_parser()
+    raw = sys.argv[1:] if argv is None else list(argv)
+    # A launcher, not a run: no arguments ON THE COMMAND LINE, or --gui. main([]) called from code
+    # keeps argparse's usage error rather than opening a window.
+    if (argv is None and not raw) or "--gui" in raw:
+        return gui(ap)
     a = ap.parse_args(argv)
+    if a.gui:                           # an abbreviation such as --gu
+        return gui(ap)
     t0 = time.time()
     try:
         spec = sm.parse_spec(a.group, a.order)

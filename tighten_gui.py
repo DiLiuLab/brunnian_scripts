@@ -18,7 +18,9 @@ tkinter is in the standard library, so this adds no dependency to a project
 that a volunteer has to install on their own machine.
 
 Entered automatically when tighten_cycle.py is run with no arguments, or
-explicitly with --gui.
+explicitly with --gui. tighten_lib/slp_tighten.py opens the same window for the
+SLP polish the same way (no arguments, or --gui), passing its own blurb,
+examples, file pickers and log location; App knows nothing about either tool.
 """
 from __future__ import annotations
 
@@ -161,8 +163,10 @@ class HelpChip(tk.Label):
 class Row:
     """One argparse action rendered as a labelled widget plus a help chip."""
 
-    def __init__(self, parent, action, row):
+    def __init__(self, parent, action, row, browse=None, examples=None):
         self.action = action
+        self.browse = browse if browse is not None else {"input": "open", "work_dir": "dir"}
+        self.examples = examples if examples is not None else EXAMPLES
         self.dest = action.dest
         self.is_flag = action.nargs == 0
         name = action.option_strings[0] if action.option_strings else action.dest
@@ -189,19 +193,25 @@ class Row:
             self.widget.grid(row=row, column=1, sticky="w")
 
         col = 2
-        if self.dest in ("input", "work_dir"):
+        if self.dest in self.browse:
             tk.Button(parent, text="Browse",
                       command=self._browse).grid(row=row, column=col, padx=4)
             col += 1
         HelpChip(parent, name, action.help, action.default,
-                 EXAMPLES.get(self.dest)).grid(row=row, column=col, padx=(6, 10))
+                 self.examples.get(self.dest)).grid(row=row, column=col, padx=(6, 10))
 
     def _browse(self):
-        if self.dest == "work_dir":
+        kind = self.browse.get(self.dest, "open")
+        title = {"gate_ref": "Reference link for the HOMFLY gate"}.get(self.dest, "Input link")
+        if kind == "dir":
             got = filedialog.askdirectory(title="Work directory (keep out of Dropbox)")
+        elif kind == "save":
+            got = filedialog.asksaveasfilename(
+                title="Output file", defaultextension=".xyz",
+                filetypes=[("link files", "*.xyz"), ("all files", "*")])
         else:
             got = filedialog.askopenfilename(
-                title="Input link", filetypes=[("link files", "*.xyz *.vect"),
+                title=title, filetypes=[("link files", "*.xyz *.vect"),
                                                ("all files", "*")])
         if got:
             self.var.set(got)
@@ -219,10 +229,10 @@ class Row:
         if a.default is not None and val == str(a.default):
             return []                               # leave defaults implicit
         if getattr(a, "nargs", None) is None and a.dest == "rr_arg":
-            out = []
-            for piece in val.split():
-                out += [a.option_strings[0], piece]
-            return out
+            # opt=value, so a piece that starts with '-' (--Timewarp) is not read as an option
+            return [f"{a.option_strings[0]}={piece}" for piece in val.split()]
+        if val.startswith("-"):                     # e.g. --ref -1,0,0 or --slp-arg --no-soc
+            return [f"{a.option_strings[0]}={val}"]
         return [a.option_strings[0], val]
 
 
@@ -234,9 +244,20 @@ class App:
     parser and the script to launch are both handed in, so the same window
     serves tighten_cycle.py, sono_link_xyz.py or anything else with a parser."""
 
-    def __init__(self, parser, script: Path = REPO / "tighten_cycle.py"):
+    def __init__(self, parser, script: Path = REPO / "tighten_cycle.py", *, blurb=None,
+                 examples=None, browse=None, log_for=None, quick_run=False):
+        """blurb: the header text; examples: dest -> example text; browse: dest ->
+        'open' | 'save' | 'dir' (which rows get a Browse button); log_for(app) ->
+        (log Path, None) or (None, reason) for Run in background; quick_run, if
+        given, adds a button that runs the command here and shows its output; it is
+        True or a predicate quick_run(app) -> (ok, reason) that refuses anything but
+        the modes that finish in seconds (such as slp_tighten.py --group detect)."""
         self.parser = parser
         self.script = Path(script)
+        self.examples = examples if examples is not None else EXAMPLES
+        self.browse = browse if browse is not None else {"input": "open", "work_dir": "dir"}
+        self.log_for = log_for if log_for is not None else App._cycle_log
+        self.quick_ok = quick_run if callable(quick_run) else (lambda app: (True, None))
         self.root = tk.Tk()
         self.root.title(f"{self.script.stem} — parameters")
         self.rows: list[Row] = []
@@ -247,7 +268,7 @@ class App:
                  font=("Helvetica", 16, "bold")).pack(anchor="w")
         tk.Label(head, bg="white", fg="#555", justify="left",
                  font=("Helvetica", 11), wraplength=760,
-                 text=("Fill in what you need and leave the rest at its default. "
+                 text=blurb or ("Fill in what you need and leave the rest at its default. "
                        "Every field has a  ?  that explains it. A cycle runs for "
                        "hours, so Run starts it in the background, detached from "
                        "this window — closing the window will not stop it.")
@@ -263,7 +284,7 @@ class App:
             tab = tk.Frame(nb)
             nb.add(tab, text=group.title.replace("arguments", "args"))
             for i, action in enumerate(acts):
-                self.rows.append(Row(tab, action, i))
+                self.rows.append(Row(tab, action, i, self.browse, self.examples))
 
         self.cmd = tk.Text(self.root, height=5, wrap="word", font=("Menlo", 10),
                            bg="#f5f9fc", relief="flat", padx=10, pady=8)
@@ -276,6 +297,9 @@ class App:
         tk.Button(bar, text="Copy", command=self.copy).pack(side="left", padx=6)
         tk.Button(bar, text="Run in background",
                   command=self.run).pack(side="left", padx=6)
+        if quick_run:
+            tk.Button(bar, text="Run now (short jobs)",
+                      command=self.run_now).pack(side="left", padx=6)
         tk.Button(bar, text="Quit", command=self.root.destroy).pack(side="right")
 
     # -- helpers ---------------------------------------------------------- #
@@ -333,37 +357,69 @@ class App:
         self.root.clipboard_append(line)
         self._show(line + "\n\n(copied to the clipboard)")
 
+    def value(self, dest: str) -> str:
+        return next((r.var.get().strip() for r in self.rows if r.dest == dest), "")
+
+    @staticmethod
+    def _cycle_log(app):
+        wd = app.value("work_dir")
+        if not wd:
+            return None, ("Set --work-dir before running. It holds the run tree, "
+                          "and it should be outside Dropbox.")
+        work = Path(wd).expanduser()
+        work.mkdir(parents=True, exist_ok=True)
+        return work / "cycle.log", None
+
+    def run_now(self, timeout: float = 180):
+        """Run the command here and show its output: for jobs that finish in seconds.
+        The window waits while it runs, so the tool's predicate refuses anything longer."""
+        cmd = self.command()
+        if not cmd:
+            return
+        ok, why = self.quick_ok(self)
+        if not ok:
+            self._popup("Use Run in background", why)
+            return
+        line = " ".join(shlex.quote(c) for c in cmd)
+        self._show(line + "\n\nrunning ...")
+        self.root.update_idletasks()
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            out = (p.stdout + p.stderr).strip()
+            self._show(f"{line}\n\nexit {p.returncode}\n\n{out[-6000:]}")
+        except subprocess.TimeoutExpired as exc:
+            got = ((exc.stdout or b"") + (exc.stderr or b""))
+            got = got.decode(errors="replace") if isinstance(got, bytes) else got
+            self._show(line + f"\n\nSTOPPED after {timeout:.0f} s (the job was killed) -- use "
+                              f"Run in background for anything longer.\n\n{got[-4000:]}")
+
     def run(self):
         cmd = self.command()
         if not cmd:
             return
-        wd = next((r.var.get().strip() for r in self.rows
-                   if r.dest == "work_dir"), "")
-        if not wd:
-            self._popup("No work directory",
-                        "Set --work-dir before running. It holds the run tree, "
-                        "and it should be outside Dropbox.")
+        log, why = self.log_for(self)
+        if log is None:
+            self._popup("Cannot start in the background", why)
             return
-        work = Path(wd).expanduser()
-        work.mkdir(parents=True, exist_ok=True)
-        log = work / "cycle.log"
         with log.open("a") as sink:
             subprocess.Popen(cmd, stdout=sink, stderr=subprocess.STDOUT,
                              start_new_session=True)
         self._show(" ".join(shlex.quote(c) for c in cmd)
                    + f"\n\nstarted in the background; it keeps running if you "
-                     f"close this window.\nlog:   {log}\nwatch: tail -f {log}")
+                     f"close this window.\nlog:   {log}\nwatch: tail -f {shlex.quote(str(log))}")
 
     def go(self):
         self.root.mainloop()
 
 
-def launch(parser, script: Path = REPO / "tighten_cycle.py") -> int:
+def launch(parser, script: Path = REPO / "tighten_cycle.py", **options) -> int:
+    """Open the window for any parser; options go to App (blurb, examples,
+    browse, log_for, quick_run)."""
     try:
-        App(parser, script).go()
+        App(parser, script, **options).go()
     except tk.TclError as exc:
         print(f"error: cannot open a window ({exc}).\n"
-              f"       Run tighten_cycle.py with --help for the command line "
+              f"       Run {Path(script).name} with --help for the command line "
               f"interface instead.", file=sys.stderr)
         return 2
     return 0

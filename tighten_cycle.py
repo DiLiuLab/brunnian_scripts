@@ -1236,6 +1236,7 @@ _SLP_OWNED = {"output": "-o", "group": "--slp-group", "order": "--slp-group",
               "resample_vu": "--slp-resample-vu",
               "diagnose": "slp_tighten.py --diagnose by hand",
               "dry_run": "the cycle's own --dry-run",
+              "gui": "nothing -- the stage is not interactive",
               # The edge bounds are the collapse guard's floor (slp_accept rule 6). Passing
               # them through would move the guard that keeps an slp1-style collapse out of
               # BEST.xyz, so the stage fixes them at the tool's defaults.
@@ -2892,7 +2893,12 @@ def main(argv: list[str] | None = None) -> int:
     # assembles a command line and starts it detached, so it never needs the
     # validation below -- which would reject an empty argv outright.
     if not raw or "--gui" in raw:
-        from tighten_gui import launch
+        try:
+            from tighten_gui import launch
+        except ImportError as exc:      # a Python built without Tk
+            print(f"error: no tkinter in this Python ({exc}); run with --help for the command "
+                  "line.", file=sys.stderr)
+            return 2
         return launch(parser)
 
     args = parser.parse_args(argv)

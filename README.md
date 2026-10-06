@@ -169,7 +169,8 @@ be: ropelength = length / thickness, minimised with
   - independent SONO relaxer, allocation-grid sweeps, and adaptive coarsening
     with an in-run HOMFLY guard
 - `tighten_gui.py`
-  - a tkinter window for `tighten_cycle.py`, entered by running it with **no
+  - a tkinter window for `tighten_cycle.py` and for `tighten_lib/slp_tighten.py`,
+    entered by running either with **no
     arguments** or with `--gui`. Every label, default, type and help string is
     read out of the argument parser at run time, so nothing is duplicated: add
     an argument to `build_parser()` and it appears in the window, in its own
@@ -182,7 +183,8 @@ be: ropelength = length / thickness, minimised with
     job. *Build command* just shows the command line, which is also the way to
     learn the CLI
   - the values are validated by argparse itself before anything is launched, so
-    the window cannot assemble a command the script would reject
+    the window cannot assemble a command the parser would reject (the script can
+    still refuse it later: slp_tighten.py checks -o and the group only in main())
 - `tighten_cycle.py`
   - the **cycle driver**: automates contract/squeeze-then-recondition rounds, so
     a link can be taken from a raw layout to a tightened result unattended
@@ -281,6 +283,14 @@ be: ropelength = length / thickness, minimised with
     `extract_best.py` recovers both the lowest-ropelength and the most nearly
     critical snapshot, which diverge
 - `tighten_lib/slp_tighten.py`
+  - opens the same kind of window when run with **no arguments** or with
+    `--gui` (`python3 tighten_lib/slp_tighten.py`): file pickers for the input,
+    the output and `--gate-ref`; *Run now* for the quick modes (`--group
+    detect`, `--dry-run`, `--diagnose`), which runs inside the window and
+    shows its output (the window waits; it refuses a real run); *Run in
+    background* for a real run, detached and logged next to the output with
+    `.xyz` replaced by `.log`. Paths may use `~`. The cycle's own window already
+    carries the `--slp` stage
   - the **equivariant sequential-LP polish**: per-vertex displacements
     restricted to the exact symmetry subspace (C1, Cs, Ci, Cn, Cnv, Cnh, RDn,
     Dnd, S2n, via `tighten_lib/symmetry_maps.py`). Each LP minimises length
