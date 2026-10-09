@@ -26,8 +26,17 @@ def isosig(manifold):
 
 
 def isomorphic_triangulations_preserving_links(A, B) -> bool:
+    """True only if some combinatorial isomorphism of the two exteriors carries
+    meridians to meridians, i.e. the LINKS are the same, not just their exteriors.
+
+    ``Isometry.extends_to_link`` is a method and must be CALLED.  Without the
+    parentheses ``any(...)`` saw bound-method objects, which are always truthy,
+    so every pair of homeomorphic exteriors was reported as a duplicate link
+    (fixed 2026-10-09; measured on HTLinkExteriors <= 10 crossings, 21 of the 80
+    pairs with isometric exteriors had been called duplicates, and none is).
+    """
     isomorphisms = A.isomorphisms_to(B)
-    return any(isom.extends_to_link for isom in isomorphisms)
+    return any(isom.extends_to_link() for isom in isomorphisms)
 
 
 def same_link_exterior_no_geometry(A, B, max_tries: int = 100000) -> bool:
